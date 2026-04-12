@@ -1,0 +1,30 @@
+# Sensitive files
+.env
+.env.local
+*.key
+*.pem
+**/credentials.json
+**/oauth-token.json
+**/.claude-setup-token
+
+# Runtime/logs
+logs/
+*.log
+sessions/
+state/
+.DS_Store
+
+# Private data
+memory/
+*.sqlite
+*.db
+
+# Node modules
+node_modules/
+package-lock.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

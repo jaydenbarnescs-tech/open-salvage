@@ -1,0 +1,9 @@
+{
+  "daily_limit": 8,
+  "webhook_url": "https://mgc-pass-proxy.duckdns.org/n8n/webhook/overseas-buyer-email",
+  "slack_dm": "U0AM9DC9SJW",
+  "sender_email": "jayden.barnes@mgc-global01.com",
+  "sender_name": "Jayden Barnes",
+  "categories_rotation": ["health", "beauty", "food", "tools", "general"],
+  "last_category_index": 0
+}
