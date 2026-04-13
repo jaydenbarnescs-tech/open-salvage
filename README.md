@@ -98,12 +98,11 @@ A Socket Mode Slack bot receives messages, routes them through the agent worker,
 ## Requirements
 
 - macOS (LaunchAgents are macOS-specific; core scripts are portable)
-- [Claude Code CLI](https://docs.anthropic.com/claude-code) with OpenClaw installed
+- **[Claude Code CLI](https://docs.anthropic.com/claude-code)** — logged in with a Claude.ai account (Max plan recommended). This is the engine everything runs on.
 - Node.js 20+
 - Python 3.11+
-- [Ollama](https://ollama.ai) running locally (for embeddings)
+- [Ollama](https://ollama.ai) running locally (for embeddings — no data leaves your machine)
 - SQLite3
-- A Claude API key
 - A Slack bot token (for the Slack bridge — optional if you only want the CLI)
 
 ---
@@ -137,11 +136,12 @@ Key config values:
 
 | Key | Description |
 |---|---|
-| `ANTHROPIC_API_KEY` | Your Claude API key |
 | `SLACK_BOT_TOKEN` | Slack bot token (`xoxb-...`) |
 | `SLACK_APP_TOKEN` | Slack app-level token (`xapp-...`) for Socket Mode |
 | `OLLAMA_BASE_URL` | Ollama endpoint (default: `http://localhost:11434`) |
 | `MCP_PROXY_URL` | Optional MCP proxy for remote tool access |
+
+> **Note on Claude auth:** The main agent runs via the Claude Code CLI, which authenticates directly with your Claude.ai account (Max plan). No raw `ANTHROPIC_API_KEY` is required for the agent itself. The mem0 memory layer makes separate LLM calls for memory extraction — configure those via `mem0/config.py`.
 
 ---
 
