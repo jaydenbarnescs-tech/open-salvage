@@ -46,14 +46,27 @@ That is openSalvage. Every component traces back to deep research into the top p
 
 ## What it assembles
 
-| Source | What was taken |
-|---|---|
-| [Claude Code CLI](https://docs.anthropic.com/claude-code) | The agent engine — every LLM call, every tool use, every sub-agent |
-| [mem0](https://github.com/mem0ai/mem0) | FAISS-backed semantic memory with category-based extraction |
-| [LangGraph](https://github.com/langchain-ai/langgraph) | Two-phase execute-then-respond agent loop pattern |
-| AutoGPT | Autonomous background task queue with poller daemon |
-| SwarmClaw | SQLite durable state machine for task and slot tracking |
-| [Ollama](https://ollama.ai) | Local embeddings (qwen3-embedding:0.6b, bge-m3) — no data leaves your machine |
+### [mem0](https://github.com/mem0ai/mem0) — persistent semantic memory
+
+Claude Code has zero memory between sessions — every conversation starts blank. mem0 solves the specific problem of *operational* memory: standing instructions, preferences, commitments, and system state. It extracts and stores these as dense vectors in a local FAISS index so the agent can recall them in future sessions. Without this layer, the agent forgets everything the moment a session ends. The category-based extraction was customised to preserve operational directives verbatim rather than summarising them as personal facts.
+
+### [LangGraph](https://github.com/langchain-ai/langgraph) — execute-then-respond loop
+
+The naive approach is for the agent to talk and act at the same time. LangGraph's research proved this is broken: if the agent says "I'll do that" before actually doing it, and anything goes wrong in between, the action never happens — but the user thinks it did. openSalvage enforces the two-phase pattern: execute all actions first, respond only after. In a Slack context where commitments are made in writing, this is the difference between an agent that keeps its word and one that fails silently.
+
+### AutoGPT — autonomous task queue
+
+Claude Code is reactive by design — it responds to prompts. To make it *autonomous* — doing work without being triggered, continuing tasks across sessions, running scheduled jobs overnight — you need a persistent queue of goals and a daemon that works through them independently. AutoGPT pioneered this loop. The `salvage-task-poller` is that pattern applied to Claude Code: a background process that continuously pulls from the queue and dispatches work without human input.
+
+### SwarmClaw — SQLite durable state machine
+
+When multiple agents and tool calls run concurrently, you need state that survives crashes and prevents race conditions. SQLite with WAL mode gives you ACID transactions and crash recovery with no external service. SwarmClaw showed how to use it as a coordination primitive — atomic `BEGIN IMMEDIATE` transactions so two processes never claim the same task simultaneously. This is exactly how the MCP slot system enforces the 5-concurrent-process limit without a single race condition.
+
+### [Ollama](https://ollama.ai) — local embeddings
+
+The agent handles private Slack messages, internal documents, client data, and business strategy. Sending any of that to a third-party embedding API is not acceptable. Ollama runs entirely on your machine — `qwen3-embedding:0.6b` for semantic memory, `bge-m3` for the workspace index — no data leaves, no embedding costs, no rate limits, no internet dependency for memory search. Privacy is not a setting. It is the architecture.
+
+---
 
 The result has been running continuously in a real business — handling Slack messages, executing autonomous tasks, managing memory across sessions, and coordinating parallel work — without the 100+ zombie-process issues that come from naive Claude API usage.
 
