@@ -1,10 +1,22 @@
 # openSalvage
 
-> Loot the best from open source. Run it all yourself.
+> The production agent framework for Claude Code CLI.
 
-openSalvage is a self-hosted AI agent framework built on top of [Claude Code](https://github.com/anthropics/claude-code) (OpenClaw harness). It does not try to reinvent anything. Instead it finds the best patterns from across the open-source AI landscape — memory systems, task queues, concurrency controls, tool execution — and assembles them into a single coherent system that runs on your own machine.
+**Claude Code CLI is one of the most powerful AI tools available. But it ships without a framework around it** — no persistent memory, no task queue, no concurrency control, no background services, no Slack integration. You get the engine. You don't get the car.
 
-The name is literal. You go through what already exists, take what works, and put it on yourself.
+openSalvage is the car.
+
+It is a self-hosted agent framework built entirely on top of [Claude Code CLI](https://docs.anthropic.com/claude-code), assembled from the best patterns across the open-source AI landscape. If you have Claude Code installed and a Claude.ai subscription, you have everything you need to run a production-grade autonomous agent on your own machine — with persistent memory, a durable task queue, concurrent execution control, background services, and real-time Slack interaction.
+
+No separate API keys. No extra billing. No cloud dependencies for your agent state. Just Claude Code, running properly.
+
+---
+
+## The concept
+
+The name comes from a simple idea: don't build from scratch when the best patterns already exist. Go through the open-source AI ecosystem, identify what is genuinely best-in-class in each area — memory, orchestration, state management, tool execution — rip those patterns out, and assemble them onto a single framework.
+
+That is openSalvage. Every component traces back to research into the top projects in its space.
 
 ---
 
@@ -12,14 +24,14 @@ The name is literal. You go through what already exists, take what works, and pu
 
 | Source | What was taken |
 |---|---|
-| [mem0](https://github.com/mem0ai/mem0) | FAISS semantic memory with category-based extraction |
-| [LangGraph](https://github.com/langchain-ai/langgraph) | Two-phase execute-then-respond agent loop |
-| AutoGPT patterns | Autonomous background task queue with poller daemon |
+| [Claude Code CLI](https://docs.anthropic.com/claude-code) | The agent engine — every LLM call, every tool use, every sub-agent |
+| [mem0](https://github.com/mem0ai/mem0) | FAISS-backed semantic memory with category-based extraction |
+| [LangGraph](https://github.com/langchain-ai/langgraph) | Two-phase execute-then-respond agent loop pattern |
+| AutoGPT | Autonomous background task queue with poller daemon |
 | SwarmClaw | SQLite durable state machine for task and slot tracking |
-| OpenClaw / Claude Code | The agent harness, skill system, and MCP tool calling |
-| [Ollama](https://ollama.ai) | Local embeddings (qwen3-embedding:0.6b, bge-m3) without sending data to third parties |
+| [Ollama](https://ollama.ai) | Local embeddings (qwen3-embedding:0.6b, bge-m3) — no data leaves your machine |
 
-The result is a production-grade agent system that has been running continuously in a real business — handling Slack messages, executing autonomous tasks, managing memory across sessions, and coordinating parallel work — without hitting the 100+ zombie-process issues that come from naive Claude API usage.
+The result has been running continuously in a real business — handling Slack messages, executing autonomous tasks, managing memory across sessions, and coordinating parallel work — without the 100+ zombie-process issues that come from naive Claude API usage.
 
 ---
 
