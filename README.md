@@ -4,13 +4,22 @@
 
 ---
 
-## The problem everyone ran into
+## The problem
 
-When people try to build agent frameworks on top of Claude, they take the obvious path: wrap Claude CLI like an API. Call it programmatically. Treat it like a black box you can plug into any orchestration layer.
+You're already paying $100–$200/month for a Claude Max plan. You want Claude to act as an autonomous agent — running scheduled tasks, responding to Slack, maintaining memory across sessions, doing background work overnight. That is exactly what you're paying for.
 
-**Anthropic detects this.** When you use Claude CLI as a proxy or API wrapper, it knows. The result: you get throttled, and you lose access to Sonnet and Opus — you're locked to Haiku only.
+But here's what actually happens:
 
-Every major agent framework that tried to bolt Claude CLI on after the fact hit this wall.
+**Option 1: Anthropic's own agent platform (Claude Managed Agents)**
+Launched April 2026. Requires a separate API account. Costs $0.08 per session-hour plus standard API token rates on top of that — completely separate from your Max plan subscription. Your $200/month gets you nothing here.
+
+**Option 2: Third-party agent frameworks**
+As of April 2026, Anthropic changed policy: Max plan subscribers can no longer use their subscription to power third-party agent tools. API-powered agents now require direct API billing. Your Max plan is cut off.
+
+**Option 3: Wrap Claude CLI yourself**
+People try this. They treat Claude CLI like an API, proxy requests through it, build a framework around the outside. Anthropic detects it. You get throttled and locked to Haiku — no Sonnet, no Opus.
+
+None of these work if you just want to use what you're already paying for.
 
 ---
 
