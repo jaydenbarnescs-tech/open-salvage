@@ -6,9 +6,9 @@ openSalvage is production software. Every change runs on a live agent. Treat it 
 
 ## Philosophy
 
-**Salvage the best.** Don't reinvent what already works. When a pattern exists in mem0, LangGraph, AutoGPT, SwarmClaw, or OpenClaw, steal it explicitly and attribute it in comments. The codebase is a curated collection of proven ideas, not original research.
+**Research before you build.** Before adding or replacing any component, study how the top open-source projects solve the same problem. The bar for inclusion is high — it has to be genuinely best-in-class, not just functional. When a proven pattern exists in mem0, LangGraph, AutoGPT, SwarmClaw, or OpenClaw, adopt it explicitly and attribute it in comments.
 
-**Keep it simple.** A bash script that does one thing reliably beats a framework that does ten things flakily. If you're adding abstraction, justify it with a concrete problem it solves.
+**Build for scale.** Design decisions should hold under load — concurrent agents, high message volume, long-running tasks. If your contribution works now but breaks at 10x, it needs rethinking before it goes in.
 
 **Production-first.** openSalvage runs continuously on a real workstation serving a real agent. There is no staging environment. If your change can crash the task poller or leave zombie processes, test it manually before merging.
 

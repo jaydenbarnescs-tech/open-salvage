@@ -193,15 +193,17 @@ Background: `salvage-task-poller` runs every 60 seconds, promoting queued MCP sl
 
 ## Philosophy
 
-**Take what works. Drop what doesn't. Ship something real.**
+**Research first. Build for scale. Settle for nothing less than the best.**
 
-Most AI agent frameworks are designed to be frameworks — abstractions, interfaces, plugin systems. openSalvage is designed to run. It started as a production system for a real business and was open-sourced afterward, not the other way around.
+Before any component was written, the top open-source projects in that space were studied — how they handle memory, how they queue tasks, how they recover from failure, where they fall short. openSalvage is the synthesis of that research, not a shortcut past it.
+
+The salvage concept is not about taking whatever is convenient. It is about identifying what is genuinely best-in-class across the ecosystem — the memory architecture from mem0, the state machine durability from SwarmClaw, the agent loop patterns from LangGraph — and integrating them at a level of quality that matches or exceeds each source.
 
 This means:
-- **No speculative abstractions.** If a pattern exists in one place, it stays in one place until there's a real reason to generalise it.
-- **SQLite over external services.** Every critical state — task queue, memory slots, message outbox, run history — lives in a local SQLite file. No Redis, no RabbitMQ, no external dependencies for state.
-- **Local embeddings.** Ollama handles all embedding calls. Your documents and memories don't leave your machine.
-- **Scripts over frameworks.** Most of `bin/` is bash and Node.js. You can read the whole thing in an afternoon.
+- **Scalability over simplicity.** Every design decision is made with growth in mind — concurrent task execution, slot-based rate control, durable queues, service supervision. The system is built to handle more, not just enough.
+- **Quality over speed.** Components are researched thoroughly before they are built. If a better pattern exists somewhere in open source, it gets found and incorporated.
+- **Production-grade from day one.** openSalvage started as a live production system, not a prototype. Durability, crash recovery, and operational visibility are not afterthoughts.
+- **Local-first where it matters.** Embeddings and memory stay on your machine. Data sovereignty is not a feature to be added later.
 
 ---
 
