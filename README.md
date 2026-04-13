@@ -1,22 +1,46 @@
 # openSalvage
 
-> The production agent framework for Claude Code CLI.
+> The production agent framework for Claude Code CLI — built from the inside.
 
-**Claude Code CLI is one of the most powerful AI tools available. But it ships without a framework around it** — no persistent memory, no task queue, no concurrency control, no background services, no Slack integration. You get the engine. You don't get the car.
+---
 
-openSalvage is the car.
+## The problem everyone ran into
 
-It is a self-hosted agent framework built entirely on top of [Claude Code CLI](https://docs.anthropic.com/claude-code), assembled from the best patterns across the open-source AI landscape. If you have Claude Code installed and a Claude.ai subscription, you have everything you need to run a production-grade autonomous agent on your own machine — with persistent memory, a durable task queue, concurrent execution control, background services, and real-time Slack interaction.
+When people try to build agent frameworks on top of Claude, they take the obvious path: wrap Claude CLI like an API. Call it programmatically. Treat it like a black box you can plug into any orchestration layer.
 
-No separate API keys. No extra billing. No cloud dependencies for your agent state. Just Claude Code, running properly.
+**Anthropic detects this.** When you use Claude CLI as a proxy or API wrapper, it knows. The result: you get throttled, and you lose access to Sonnet and Opus — you're locked to Haiku only.
+
+Every major agent framework that tried to bolt Claude CLI on after the fact hit this wall.
+
+---
+
+## What openSalvage does differently
+
+openSalvage was not built as a wrapper around Claude Code CLI. **It was built from inside it, from day one.**
+
+The framework works with Claude Code's native architecture — the way it handles sessions, tool calls, sub-agents, and workspace context — rather than trying to intercept or proxy it. Because it is not pretending to be something it isn't, Anthropic's systems do not treat it as abuse.
+
+The result:
+- **Full model access** — Sonnet and Opus, not just Haiku
+- **No throttling** — the same rate limits as normal Claude Code usage
+- **No API key needed** — runs entirely off your Claude.ai subscription (Max plan)
+- **No extra billing** — your subscription covers everything
+
+This is what people building on Claude Code have wanted and nobody has shipped.
+
+---
+
+## What it is
+
+A self-hosted agent framework assembled from the best patterns across the open-source AI landscape — persistent memory, durable task queue, concurrent execution control, background services, and real-time Slack integration — all running on top of Claude Code CLI, the right way.
 
 ---
 
 ## The concept
 
-The name comes from a simple idea: don't build from scratch when the best patterns already exist. Go through the open-source AI ecosystem, identify what is genuinely best-in-class in each area — memory, orchestration, state management, tool execution — rip those patterns out, and assemble them onto a single framework.
+The name comes from a simple idea: don't build from scratch when the best patterns already exist. Go through the open-source AI ecosystem, identify what is genuinely best-in-class in each area — memory, orchestration, state management, tool execution — take those patterns, and assemble them onto a single framework.
 
-That is openSalvage. Every component traces back to research into the top projects in its space.
+That is openSalvage. Every component traces back to deep research into the top projects in its space.
 
 ---
 
