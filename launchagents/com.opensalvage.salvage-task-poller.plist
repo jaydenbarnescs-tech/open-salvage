@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.mgc.salvage-task-poller</string>
+    <string>com.opensalvage.salvage-task-poller</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>

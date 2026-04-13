@@ -19,7 +19,7 @@
 		<string>--workspace</string>
 		<string>/Users/jayden.csai/clawd</string>
 		<string>--fresh</string>
-		<string>Run overseas-buyer-outreach skill. Read ~/clawd/skills/overseas-buyer-outreach/SKILL.md for full instructions. Search for 8 overseas companies (US/UK/AU/CA/EU) that import or distribute Japanese products — health/wellness, beauty, food, industrial tools. For each: find contact email by crawling /contact /about pages. Skip domains already in ~/clawd/skills/overseas-buyer-outreach/logs/sent.json. Write a personalized 120-word B2B pitch from Jayden Barnes (jayden.barnes@mgc-global01.com), VP of Growth, MGC inc. Send via POST https://mgc-pass-proxy.duckdns.org/n8n/webhook/overseas-buyer-email. Log each sent email to sent.json. Report summary to Slack U0AM9DC9SJW.</string>
+		<string>Run overseas-buyer-outreach skill. Read ~/clawd/skills/overseas-buyer-outreach/SKILL.md for full instructions. Search for 8 overseas companies (US/UK/AU/CA/EU) that import or distribute Japanese products — health/wellness, beauty, food, industrial tools. For each: find contact email by crawling /contact /about pages. Skip domains already in ~/clawd/skills/overseas-buyer-outreach/logs/sent.json. Write a personalized 120-word B2B pitch from Jayden Barnes (jayden.barnes@mgc-global01.com), VP of Growth, MGC inc. Send via POST https://your-proxy-host/n8n/webhook/overseas-buyer-email. Log each sent email to sent.json. Report summary to Slack U0AM9DC9SJW.</string>
 	</array>
 	<key>RunAtLoad</key>
 	<false/>

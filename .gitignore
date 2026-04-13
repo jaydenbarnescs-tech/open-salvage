@@ -1,3 +1,20 @@
+# Private operational files — workspace-specific, not for public repo
+COMPANY.md
+USER.md
+SOUL.md
+AGENTS.md
+TEAM.md
+SLACK.md
+NOTION.md
+HEARTBEAT.md
+IDENTITY.md
+TOOLS.md
+vanessa-core-memory.md
+mechatron-core-memory.md
+sessions/
+memory/
+state/
+
 # Secrets — never commit
 .env
 .env.local

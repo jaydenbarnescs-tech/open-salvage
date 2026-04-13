@@ -2,7 +2,7 @@
 # install.sh — Set up salvage on a new Mac from this repo
 #
 # Run once after cloning:
-#   git clone https://github.com/jaydenbarnescs-tech/mgc-ai-workspace ~/clawd
+#   git clone https://github.com/jaydenbarnescs-tech/open-salvage ~/clawd
 #   cd ~/clawd && bash install.sh
 #
 # What this does:
@@ -56,9 +56,9 @@ done
 echo ""
 echo "→ Loading LaunchAgents..."
 AGENTS=(
-  "com.mgc.salvage-task-poller"
-  "com.mgc.salvage-watchdog"
-  "com.mgc.salvage-memory"
+  "com.opensalvage.salvage-task-poller"
+  "com.opensalvage.salvage-watchdog"
+  "com.opensalvage.salvage-memory"
   "ai.openclaw.gateway"
 )
 for agent in "${AGENTS[@]}"; do
