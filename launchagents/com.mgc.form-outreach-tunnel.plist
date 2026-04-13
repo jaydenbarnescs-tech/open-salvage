@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mgc.form-outreach-tunnel</string>
+
+    <!-- Reverse tunnel: Oracle port 9456 → this Mac port 3456            -->
+    <!-- Allows n8n on Oracle VM to call Mac's /update-sheet endpoint     -->
+    <!-- via http://localhost:9456/update-sheet                           -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/ssh</string>
+        <string>-R</string>
+        <string>9456:localhost:3456</string>
+        <string>-N</string>
+        <string>-o</string>
+        <string>ServerAliveInterval=30</string>
+        <string>-o</string>
+        <string>ServerAliveCountMax=3</string>
+        <string>-o</string>
+        <string>ExitOnForwardFailure=yes</string>
+        <string>ubuntu@64.110.107.203</string>
+        <string>-i</string>
+        <string>/Users/jayden.csai/.ssh/ssh-key-2026-03-20.key</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/form-outreach-tunnel.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/form-outreach-tunnel-err.log</string>
+</dict>
+</plist>

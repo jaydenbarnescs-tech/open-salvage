@@ -1,0 +1,260 @@
+#!/opt/homebrew/bin/node
+'use strict';
+// mechatron-ingest — Pull knowledge from all sources into workspace memory for RAG indexing
+// Usage: mechatron-ingest <workspace> [--source slack|notion|sessions|all] [--reindex]
+//
+// Sources:
+//   slack     — Fetch recent Slack DM and channel history, save as memory/*.md
+//   notion    — Fetch Notion pages, save as memory/notion-*.md
+//   sessions  — Extract key facts from Claude CLI session JSONL files
+//   all       — All of the above
+
+const fs = require('fs');
+const path = require('path');
+const { execFileSync, execSync } = require('child_process');
+const https = require('https');
+const http = require('http');
+
+const HOME = process.env.HOME || '/Users/jayden.csai';
+const WORKSPACE = process.argv[2];
+if (!WORKSPACE) { console.error('Usage: mechatron-ingest <workspace> [--source slack|notion|sessions|all] [--reindex]'); process.exit(1); }
+
+let source = 'all';
+let reindex = false;
+for (let i = 3; i < process.argv.length; i++) {
+  if (process.argv[i] === '--source') source = process.argv[++i];
+  if (process.argv[i] === '--reindex') reindex = true;
+}
+
+const MEMORY_DIR = path.join(WORKSPACE, 'memory');
+const INGEST_DIR = path.join(MEMORY_DIR, 'ingested');
+fs.mkdirSync(INGEST_DIR, { recursive: true });
+
+const SLACK_TOKEN = process.env.SLACK_BOT_TOKEN || '';
+
+function log(msg) { process.stderr.write(`[ingest] ${new Date().toISOString()} ${msg}\n`); }
+
+// ── Slack ingestion ──────────────────────────────────────────────────────
+async function fetchSlackHistory(channelId, channelName, limit = 200) {
+  return new Promise((resolve, reject) => {
+    const url = `https://slack.com/api/conversations.history?channel=${channelId}&limit=${limit}`;
+    https.get(url, { headers: { 'Authorization': `Bearer ${SLACK_TOKEN}` } }, (res) => {
+      let data = '';
+      res.on('data', d => data += d);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (!parsed.ok) { reject(new Error(parsed.error)); return; }
+          resolve(parsed.messages || []);
+        } catch (e) { reject(e); }
+      });
+    }).on('error', reject);
+  });
+}
+
+async function fetchSlackUserName(userId) {
+  return new Promise((resolve) => {
+    const url = `https://slack.com/api/users.info?user=${userId}`;
+    https.get(url, { headers: { 'Authorization': `Bearer ${SLACK_TOKEN}` } }, (res) => {
+      let data = '';
+      res.on('data', d => data += d);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          resolve(parsed.user?.real_name || parsed.user?.name || userId);
+        } catch { resolve(userId); }
+      });
+    }).on('error', () => resolve(userId));
+  });
+}
+
+async function ingestSlack() {
+  log('Ingesting Slack history...');
+
+  // Key channels to ingest
+  const channels = [
+    { id: 'D0AQW7VF4UA', name: 'dm-jayden' },
+    { id: 'C09DR06AY3V', name: 'mgc-all' },
+  ];
+
+  // Also get channel list for any we're a member of
+  try {
+    const listUrl = `https://slack.com/api/conversations.list?types=public_channel,private_channel&limit=50`;
+    const listData = await new Promise((resolve, reject) => {
+      https.get(listUrl, { headers: { 'Authorization': `Bearer ${SLACK_TOKEN}` } }, (res) => {
+        let data = '';
+        res.on('data', d => data += d);
+        res.on('end', () => { try { resolve(JSON.parse(data)); } catch(e) { reject(e); } });
+      }).on('error', reject);
+    });
+
+    if (listData.ok) {
+      for (const ch of (listData.channels || [])) {
+        if (ch.is_member && !channels.find(c => c.id === ch.id)) {
+          channels.push({ id: ch.id, name: ch.name });
+        }
+      }
+    }
+  } catch (e) { log(`WARNING: Could not list channels: ${e.message}`); }
+
+  const userCache = new Map();
+
+  for (const channel of channels) {
+    try {
+      const messages = await fetchSlackHistory(channel.id, channel.name, 100);
+      if (messages.length === 0) continue;
+
+      // Build markdown from messages (reverse chronological → chronological)
+      const lines = [`# Slack: #${channel.name}\n`, `_Ingested: ${new Date().toISOString()}_\n`];
+
+      for (const msg of messages.reverse()) {
+        if (!msg.text) continue;
+        let userName = msg.user || 'bot';
+        if (msg.user && !userCache.has(msg.user)) {
+          userCache.set(msg.user, await fetchSlackUserName(msg.user));
+        }
+        userName = userCache.get(msg.user) || userName;
+        const ts = new Date(parseFloat(msg.ts) * 1000).toISOString().slice(0, 16);
+        lines.push(`**${userName}** (${ts}): ${msg.text.replace(/\n/g, ' ').slice(0, 500)}`);
+      }
+
+      const outPath = path.join(INGEST_DIR, `slack-${channel.name}.md`);
+      fs.writeFileSync(outPath, lines.join('\n'));
+      log(`Slack #${channel.name}: ${messages.length} messages → ${outPath}`);
+    } catch (e) {
+      log(`WARNING: Slack #${channel.name} failed: ${e.message}`);
+    }
+  }
+}
+
+// ── Notion ingestion ─────────────────────────────────────────────────────
+async function ingestNotion() {
+  log('Ingesting Notion pages...');
+
+  // Read NOTION.md for page IDs
+  const notionMd = path.join(WORKSPACE, 'NOTION.md');
+  if (!fs.existsSync(notionMd)) { log('No NOTION.md found, skipping'); return; }
+
+  const content = fs.readFileSync(notionMd, 'utf-8');
+  const pageIds = [];
+  const idRegex = /`([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`/g;
+  let match;
+  while ((match = idRegex.exec(content)) !== null) {
+    // Also grab the name from the same line
+    const lineStart = content.lastIndexOf('\n', match.index) + 1;
+    const line = content.slice(lineStart, content.indexOf('\n', match.index));
+    const nameMatch = line.match(/\|\s*(.+?)\s*\|/);
+    const name = nameMatch ? nameMatch[1].trim().replace(/[^a-zA-Z0-9\u3000-\u9fff-]/g, '-').slice(0, 50) : match[1].slice(0, 8);
+    pageIds.push({ id: match[1], name });
+  }
+
+  for (const page of pageIds) {
+    try {
+      // Use mechatron-tools to read Notion page
+      const result = execFileSync(path.join(HOME, 'bin/mechatron-tools'), [
+        WORKSPACE,
+        `Read the Notion page with id "${page.id}". Return the full text content only, no formatting or explanation.`
+      ], { encoding: 'utf-8', timeout: 120000 });
+
+      if (result.trim().length > 50) {
+        const outPath = path.join(INGEST_DIR, `notion-${page.name}.md`);
+        fs.writeFileSync(outPath, `# Notion: ${page.name}\n\n_Page ID: ${page.id}_\n_Ingested: ${new Date().toISOString()}_\n\n${result.trim()}`);
+        log(`Notion ${page.name}: ${result.trim().length} chars → ${outPath}`);
+      }
+    } catch (e) {
+      log(`WARNING: Notion ${page.name} failed: ${e.message}`);
+    }
+  }
+}
+
+// ── Session history ingestion ────────────────────────────────────────────
+function ingestSessions() {
+  log('Ingesting Claude CLI session history...');
+
+  const projectDirs = [
+    { dir: path.join(HOME, '.claude/projects/-Users-jayden-csai-clawd'), name: 'clawd' },
+    { dir: path.join(HOME, '.claude/projects/-Users-jayden-csai-Developer'), name: 'developer' },
+  ];
+
+  for (const project of projectDirs) {
+    if (!fs.existsSync(project.dir)) continue;
+
+    const jsonlFiles = fs.readdirSync(project.dir).filter(f => f.endsWith('.jsonl')).sort();
+    // Take most recent 10 sessions
+    const recentFiles = jsonlFiles.slice(-10);
+
+    const allMessages = [];
+
+    for (const file of recentFiles) {
+      try {
+        const content = fs.readFileSync(path.join(project.dir, file), 'utf-8');
+        const lines = content.split('\n').filter(l => l.trim());
+
+        for (const line of lines) {
+          try {
+            const entry = JSON.parse(line);
+            // Extract user messages
+            if (entry.type === 'user' && entry.message?.content) {
+              const text = typeof entry.message.content === 'string'
+                ? entry.message.content
+                : JSON.stringify(entry.message.content);
+              if (text.length > 20 && text.length < 2000) {
+                allMessages.push({ role: 'user', text: text.slice(0, 500), file });
+              }
+            }
+            // Extract assistant text responses (not tool calls)
+            if (entry.message?.role === 'assistant' && entry.message?.content) {
+              const textBlocks = Array.isArray(entry.message.content)
+                ? entry.message.content.filter(b => b.type === 'text').map(b => b.text)
+                : [String(entry.message.content)];
+              for (const text of textBlocks) {
+                if (text.length > 50 && text.length < 2000) {
+                  allMessages.push({ role: 'assistant', text: text.slice(0, 500), file });
+                }
+              }
+            }
+          } catch { /* skip unparseable lines */ }
+        }
+      } catch { /* skip unreadable files */ }
+    }
+
+    if (allMessages.length > 0) {
+      const lines = [`# Session History: ${project.name}\n`, `_${allMessages.length} messages from ${recentFiles.length} recent sessions_\n_Ingested: ${new Date().toISOString()}_\n`];
+      for (const msg of allMessages.slice(-200)) { // cap at 200 most recent
+        lines.push(`[${msg.role}] ${msg.text}`);
+      }
+      const outPath = path.join(INGEST_DIR, `sessions-${project.name}.md`);
+      fs.writeFileSync(outPath, lines.join('\n'));
+      log(`Sessions ${project.name}: ${allMessages.length} messages → ${outPath}`);
+    }
+  }
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────
+async function main() {
+  log(`Ingesting into ${WORKSPACE} (source: ${source})`);
+
+  if (source === 'all' || source === 'slack') await ingestSlack();
+  if (source === 'all' || source === 'sessions') ingestSessions();
+  // Notion last — it's slowest (uses mechatron-tools for each page)
+  if (source === 'all' || source === 'notion') {
+    log('Skipping Notion for now (slow — use --source notion separately)');
+  }
+  if (source === 'notion') await ingestNotion();
+
+  // Reindex if requested
+  if (reindex || source === 'all') {
+    log('Reindexing memory with embeddings...');
+    try {
+      execFileSync(path.join(HOME, 'bin/mechatron-memory-index'), [WORKSPACE], {
+        encoding: 'utf-8', timeout: 120000, stdio: ['ignore', 'inherit', 'inherit']
+      });
+    } catch (e) {
+      log(`WARNING: Reindex failed: ${e.message}`);
+    }
+  }
+
+  log('Ingestion complete.');
+}
+
+main().catch(e => { log(`FATAL: ${e.message}`); process.exit(1); });

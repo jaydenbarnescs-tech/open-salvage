@@ -1,0 +1,23 @@
+[
+  {
+    "company": "Test Company A",
+    "url": "https://example.com",
+    "statusCode": 400,
+    "error": "Parse error",
+    "raw": ""
+  },
+  {
+    "company": "Test Company B",
+    "url": "https://example.org",
+    "statusCode": 400,
+    "error": "Parse error",
+    "raw": ""
+  },
+  {
+    "company": "Mutual Trading",
+    "url": "https://www.mutualtrading.com",
+    "statusCode": 400,
+    "error": "Parse error",
+    "raw": ""
+  }
+]

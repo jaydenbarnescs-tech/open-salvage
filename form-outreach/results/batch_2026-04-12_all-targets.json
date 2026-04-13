@@ -1,0 +1,21 @@
+{
+  "summary": {
+    "total": 254,
+    "success": 1,
+    "errors": 0
+  },
+  "results": [
+    {
+      "timestamp": "2026-04-12T16:16:59.870Z",
+      "company": "AudioCubes",
+      "website": "https://audiocubes.com",
+      "formUrl": "https://audiocubes.com/pages/contact-us",
+      "fieldsFilled": 5,
+      "submitted": false,
+      "mode": "LIVE",
+      "status": "ok",
+      "error": null,
+      "note": "LIVE — submit error: elementHandle.click: Timeout 30000ms exceeded.\nCall log:\n  - attempting click action\n    2 × waiting for element to be visible, enabled and stable\n      - element is visible, enabled and stable\n      - scrolling into view if needed\n      - done scrolling\n      - <shopify-forms-embed id=\"app-embed-container-759001\"></shopify-forms-embed> intercepts pointer events\n    - retrying click action\n    - waiting 20ms\n    2 × waiting for element to be visible, enabled and stable\n      - element is visible, enabled and stable\n      - scrolling into view if needed\n      - done scrolling\n      - <shopify-forms-embed id=\"app-embed-container-759001\"></shopify-forms-embed> intercepts pointer events\n    - retrying click action\n      - waiting 100ms\n    52 × waiting for element to be visible, enabled and stable\n       - element is visible, enabled and stable\n       - scrolling into view if needed\n       - done scrolling\n       - <shopify-forms-embed id=\"app-embed-container-759001\"></shopify-forms-embed> intercepts pointer events\n     - retrying click action\n       - waiting 500ms\n"
+    }
+  ]
+}

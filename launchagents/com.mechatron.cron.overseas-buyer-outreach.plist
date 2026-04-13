@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/jayden.csai</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/jayden.csai/bin</string>
+	</dict>
+	<key>Label</key>
+	<string>com.mechatron.cron.overseas-buyer-outreach</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/jayden.csai/bin/mechatron</string>
+		<string>--task</string>
+		<string>general</string>
+		<string>--workspace</string>
+		<string>/Users/jayden.csai/clawd</string>
+		<string>--fresh</string>
+		<string>Run overseas-buyer-outreach skill. Read ~/clawd/skills/overseas-buyer-outreach/SKILL.md for full instructions. Search for 8 overseas companies (US/UK/AU/CA/EU) that import or distribute Japanese products — health/wellness, beauty, food, industrial tools. For each: find contact email by crawling /contact /about pages. Skip domains already in ~/clawd/skills/overseas-buyer-outreach/logs/sent.json. Write a personalized 120-word B2B pitch from Jayden Barnes (jayden.barnes@mgc-global01.com), VP of Growth, MGC inc. Send via POST https://mgc-pass-proxy.duckdns.org/n8n/webhook/overseas-buyer-email. Log each sent email to sent.json. Report summary to Slack U0AM9DC9SJW.</string>
+	</array>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardErrorPath</key>
+	<string>/Users/jayden.csai/claude-agent/logs/cron-overseas-buyer-outreach.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/jayden.csai/claude-agent/logs/cron-overseas-buyer-outreach.log</string>
+	<key>StartCalendarInterval</key>
+	<array>
+		<dict>
+			<key>Hour</key>
+			<integer>9</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+			<key>Weekday</key>
+			<integer>1</integer>
+		</dict>
+		<dict>
+			<key>Hour</key>
+			<integer>9</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+			<key>Weekday</key>
+			<integer>2</integer>
+		</dict>
+		<dict>
+			<key>Hour</key>
+			<integer>9</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+			<key>Weekday</key>
+			<integer>3</integer>
+		</dict>
+		<dict>
+			<key>Hour</key>
+			<integer>9</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+			<key>Weekday</key>
+			<integer>4</integer>
+		</dict>
+		<dict>
+			<key>Hour</key>
+			<integer>9</integer>
+			<key>Minute</key>
+			<integer>30</integer>
+			<key>Weekday</key>
+			<integer>5</integer>
+		</dict>
+	</array>
+</dict>
+</plist>

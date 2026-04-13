@@ -1,0 +1,10 @@
+{
+  "version": "2.0",
+  "skills": {
+    "alwaysInject": ["mgc-context"]
+  },
+  "rateLimit": {
+    "retryWaitSeconds": 30,
+    "maxRetries": 1
+  }
+}

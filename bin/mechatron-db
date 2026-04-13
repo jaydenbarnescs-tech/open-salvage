@@ -1,0 +1,467 @@
+#!/bin/bash
+# mechatron-db — SQLite task database management
+# Patterns stolen from SwarmClaw (durable state machine) + OpenClaw (message outbox)
+#
+# Usage:
+#   mechatron-db init                          — create/migrate database
+#   mechatron-db task create <type> <payload>  — create a new task
+#   mechatron-db task claim <agent> <types>    — atomically claim next task
+#   mechatron-db task update <id> <status>     — update task status
+#   mechatron-db task heartbeat <id>           — extend visibility timeout
+#   mechatron-db task list [status]            — list tasks
+#   mechatron-db msg save <channel> <user> <text> [thread_ts]  — save pending message
+#   mechatron-db msg done <id>                 — mark message delivered
+#   mechatron-db msg fail <id> <error>         — mark message failed with backoff
+#   mechatron-db msg pending                   — list pending/retryable messages
+#   mechatron-db msg catchup                   — list messages ready for catch-up
+#   mechatron-db run start <task_id> <agent>   — record run start
+#   mechatron-db run end <run_id> <status>     — record run completion
+#   mechatron-db stalled                       — find stalled tasks (expired timeout)
+#   mechatron-db stats                         — show database stats
+#   mechatron-db mcp-claim <pid> <instruction> [workspace]  — claim MCP slot or queue
+#   mechatron-db mcp-next <pid>                — poller: promote oldest queued to running
+#   mechatron-db mcp-done <id> [result]        — mark MCP slot done
+#   mechatron-db mcp-failed <id> [error]       — mark MCP slot failed
+#   mechatron-db mcp-result <id>               — read MCP slot result (JSON)
+#   mechatron-db mcp-recover                   — reset running slots whose PID is dead
+#   mechatron-db mcp-list [status]             — list MCP slots
+
+set -euo pipefail
+
+DB="${MECHATRON_DB:-$HOME/clawd/sessions/agent.db}"
+SQLITE="/usr/bin/sqlite3"
+
+# Ensure directory exists
+mkdir -p "$(dirname "$DB")"
+
+sql() {
+  "$SQLITE" -json "$DB" "$1" 2>/dev/null
+}
+
+sql_raw() {
+  "$SQLITE" "$DB" "$1" 2>/dev/null
+}
+
+uuid() {
+  python3 -c "import uuid; print(uuid.uuid4())"
+}
+
+# ── INIT ──────────────────────────────────────────────────────────────────
+init_db() {
+  "$SQLITE" "$DB" <<'SQL'
+-- Enable WAL mode for crash safety (SwarmClaw pattern)
+PRAGMA journal_mode=WAL;
+PRAGMA busy_timeout=5000;
+
+-- Task state machine (SwarmClaw durable execution pattern)
+CREATE TABLE IF NOT EXISTS tasks (
+  id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  status TEXT DEFAULT 'pending' CHECK(status IN ('pending','claimed','running','done','failed','cancelled','handoff')),
+  assigned_agent TEXT,
+  payload TEXT DEFAULT '{}',
+  result TEXT,
+  parent_task_id TEXT REFERENCES tasks(id),
+  source TEXT,
+  source_ref TEXT,
+  priority INTEGER DEFAULT 0,
+  retry_count INTEGER DEFAULT 0,
+  max_retries INTEGER DEFAULT 3,
+  visibility_timeout TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  claimed_at TEXT,
+  completed_at TEXT,
+  error TEXT
+);
+
+-- Message outbox (OpenClaw community pattern — Issue #32063)
+CREATE TABLE IF NOT EXISTS message_outbox (
+  id TEXT PRIMARY KEY,
+  channel TEXT NOT NULL,
+  user_id TEXT,
+  thread_ts TEXT,
+  message_text TEXT NOT NULL,
+  status TEXT DEFAULT 'pending' CHECK(status IN ('pending','processing','delivered','failed','expired')),
+  retry_count INTEGER DEFAULT 0,
+  max_retries INTEGER DEFAULT 5,
+  next_retry_at TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  processed_at TEXT,
+  error TEXT
+);
+
+-- Execution history (for monitoring)
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY,
+  task_id TEXT REFERENCES tasks(id),
+  agent TEXT NOT NULL,
+  workspace TEXT,
+  session_key TEXT,
+  started_at TEXT DEFAULT (datetime('now')),
+  completed_at TEXT,
+  status TEXT DEFAULT 'running',
+  duration_ms INTEGER,
+  exit_code INTEGER,
+  error TEXT
+);
+
+-- MCP tool concurrency slots (two-tier dispatch: live run vs queued for poller)
+-- status='running': a mechatron-tools process is actively executing right now
+-- status='queued':  over the live limit; poller will promote and run it later
+-- status='done'/'failed': terminal — result/error stored here
+CREATE TABLE IF NOT EXISTS mcp_slots (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK(status IN ('queued','running','done','failed')),
+  claimed_by INTEGER,            -- PID of the owning mechatron-tools process
+  instruction TEXT,              -- first 200 chars of the tool instruction
+  workspace TEXT,
+  result TEXT,
+  error TEXT,
+  queued_at TEXT DEFAULT (datetime('now')),
+  started_at TEXT,
+  completed_at TEXT
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, type);
+CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(assigned_agent, status);
+CREATE INDEX IF NOT EXISTS idx_tasks_timeout ON tasks(visibility_timeout);
+CREATE INDEX IF NOT EXISTS idx_outbox_status ON message_outbox(status, next_retry_at);
+CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task_id);
+CREATE INDEX IF NOT EXISTS idx_mcp_slots_status ON mcp_slots(status, queued_at);
+SQL
+  echo "Database initialized: $DB"
+}
+
+# ── TASK OPERATIONS ───────────────────────────────────────────────────────
+task_create() {
+  local type="$1"
+  local payload="${2:-{}}"
+  local source="${3:-manual}"
+  local source_ref="${4:-}"
+  local priority="${5:-0}"
+  local id=$(uuid)
+  sql_raw "INSERT INTO tasks (id, type, payload, source, source_ref, priority) VALUES ('$id', '$type', '$(echo "$payload" | sed "s/'/''/g")', '$source', '$source_ref', $priority);"
+  echo "$id"
+}
+
+task_claim() {
+  local agent="$1"
+  local types="$2"  # comma-separated: 'research','outreach'
+  # Atomic claim with visibility timeout (SwarmClaw pattern)
+  sql "UPDATE tasks SET status='claimed', assigned_agent='$agent', claimed_at=datetime('now'),
+    visibility_timeout=datetime('now', '+30 minutes')
+    WHERE id = (SELECT id FROM tasks WHERE status='pending' AND type IN ($types)
+    AND (visibility_timeout IS NULL OR visibility_timeout < datetime('now'))
+    ORDER BY priority DESC, created_at ASC LIMIT 1)
+    RETURNING *;"
+}
+
+task_update() {
+  local id="$1"
+  local status="$2"
+  local result="${3:-}"
+  local error="${4:-}"
+  if [ "$status" = "done" ] || [ "$status" = "failed" ] || [ "$status" = "cancelled" ]; then
+    sql_raw "UPDATE tasks SET status='$status', completed_at=datetime('now'), result='$(echo "$result" | sed "s/'/''/g")', error='$(echo "$error" | sed "s/'/''/g")' WHERE id='$id';"
+  else
+    sql_raw "UPDATE tasks SET status='$status' WHERE id='$id';"
+  fi
+}
+
+task_heartbeat() {
+  local id="$1"
+  sql_raw "UPDATE tasks SET visibility_timeout=datetime('now', '+30 minutes') WHERE id='$id' AND status='running';"
+}
+
+task_list() {
+  local status="${1:-}"
+  if [ -n "$status" ]; then
+    sql "SELECT id, type, status, assigned_agent, substr(payload,1,100) as payload_preview, priority, created_at FROM tasks WHERE status='$status' ORDER BY priority DESC, created_at ASC;"
+  else
+    sql "SELECT id, type, status, assigned_agent, substr(payload,1,100) as payload_preview, priority, created_at FROM tasks WHERE status NOT IN ('done','cancelled') ORDER BY priority DESC, created_at ASC;"
+  fi
+}
+
+# ── MESSAGE OUTBOX OPERATIONS ─────────────────────────────────────────────
+msg_save() {
+  local channel="$1"
+  local user_id="$2"
+  local text="$3"
+  local thread_ts="${4:-}"
+  local id=$(uuid)
+  sql_raw "INSERT INTO message_outbox (id, channel, user_id, thread_ts, message_text) VALUES ('$id', '$channel', '$user_id', '$thread_ts', '$(echo "$text" | sed "s/'/''/g")');"
+  echo "$id"
+}
+
+msg_done() {
+  local id="$1"
+  sql_raw "UPDATE message_outbox SET status='delivered', processed_at=datetime('now') WHERE id='$id';"
+}
+
+msg_fail() {
+  local id="$1"
+  local error="${2:-unknown}"
+  # Backoff schedule: 5s, 25s, 2m, 10m, 10m (OpenClaw pattern)
+  local backoff_sql="CASE
+    WHEN retry_count=0 THEN datetime('now', '+5 seconds')
+    WHEN retry_count=1 THEN datetime('now', '+25 seconds')
+    WHEN retry_count=2 THEN datetime('now', '+2 minutes')
+    ELSE datetime('now', '+10 minutes')
+  END"
+  sql_raw "UPDATE message_outbox SET status='failed', retry_count=retry_count+1, error='$(echo "$error" | sed "s/'/''/g")', next_retry_at=$backoff_sql WHERE id='$id';"
+}
+
+msg_pending() {
+  sql "SELECT * FROM message_outbox WHERE status IN ('pending','failed') AND retry_count < max_retries AND (next_retry_at IS NULL OR next_retry_at < datetime('now')) ORDER BY created_at ASC;"
+}
+
+msg_catchup() {
+  sql "SELECT * FROM message_outbox WHERE status IN ('pending','failed') AND retry_count < max_retries AND (next_retry_at IS NULL OR next_retry_at < datetime('now')) ORDER BY created_at ASC LIMIT 10;"
+}
+
+# ── RUN OPERATIONS ────────────────────────────────────────────────────────
+run_start() {
+  local task_id="$1"
+  local agent="$2"
+  local workspace="${3:-}"
+  local session_key="${4:-}"
+  local id=$(uuid)
+  sql_raw "INSERT INTO runs (id, task_id, agent, workspace, session_key) VALUES ('$id', '$task_id', '$agent', '$workspace', '$session_key');"
+  echo "$id"
+}
+
+run_end() {
+  local id="$1"
+  local status="$2"
+  local exit_code="${3:-0}"
+  local error="${4:-}"
+  sql_raw "UPDATE runs SET status='$status', completed_at=datetime('now'), exit_code=$exit_code, duration_ms=CAST((julianday(datetime('now'))-julianday(started_at))*86400000 AS INTEGER), error='$(echo "$error" | sed "s/'/''/g")' WHERE id='$id';"
+}
+
+# ── STALLED TASK RECOVERY ─────────────────────────────────────────────────
+find_stalled() {
+  sql "SELECT * FROM tasks WHERE status IN ('claimed','running') AND visibility_timeout < datetime('now') ORDER BY created_at ASC;"
+}
+
+recover_stalled() {
+  local count=$(sql_raw "SELECT COUNT(*) FROM tasks WHERE status IN ('claimed','running') AND visibility_timeout < datetime('now');")
+  if [ "$count" -gt 0 ]; then
+    sql_raw "UPDATE tasks SET status='pending', claimed_at=NULL, assigned_agent=NULL, visibility_timeout=NULL, retry_count=retry_count+1 WHERE status IN ('claimed','running') AND visibility_timeout < datetime('now') AND retry_count < max_retries;"
+    echo "Recovered $count stalled tasks"
+  fi
+  # Expire messages older than 30 minutes that are still pending
+  sql_raw "UPDATE message_outbox SET status='expired' WHERE status='pending' AND created_at < datetime('now', '-30 minutes');"
+}
+
+# ── MCP SLOT OPERATIONS ───────────────────────────────────────────────────
+# Two-tier dispatch: live tool calls get 'running' slots (up to MAX_MCP_SLOTS).
+# When over limit, they get a 'queued' slot and the poller promotes them later.
+
+MCP_MAX_SLOTS=5
+
+# Reset running slots whose PID is no longer alive.
+# Must be called before any count-based decision to avoid phantom 'running' rows
+# from processes killed with SIGKILL (which skip cleanup handlers).
+mcp_recover() {
+  local rows
+  rows=$(sql_raw "SELECT id || ' ' || COALESCE(claimed_by,'') FROM mcp_slots WHERE status='running';" 2>/dev/null || true)
+  [ -z "$rows" ] && return 0
+
+  local dead_ids=""
+  while IFS=' ' read -r slot_id slot_pid; do
+    [ -z "$slot_id" ] && continue
+    # Treat missing PID or dead process as dead
+    if [ -z "$slot_pid" ] || ! kill -0 "$slot_pid" 2>/dev/null; then
+      dead_ids="${dead_ids},'${slot_id}'"
+    fi
+  done <<< "$rows"
+
+  if [ -n "$dead_ids" ]; then
+    dead_ids="${dead_ids#,}"  # strip leading comma
+    local count
+    count=$(sql_raw "SELECT COUNT(*) FROM mcp_slots WHERE id IN ($dead_ids) AND status='running';" 2>/dev/null || echo 0)
+    sql_raw "UPDATE mcp_slots SET status='queued', claimed_by=NULL, started_at=NULL WHERE id IN ($dead_ids) AND status='running';" 2>/dev/null || true
+    [ "${count:-0}" -gt 0 ] && echo "mcp-recover: reset $count dead-PID slot(s) to queued" >&2
+  fi
+}
+
+# Called by mechatron-tools on every MCP tool invocation.
+# Recovers dead-PID slots first, then atomically inserts with correct status.
+# Output: "running|<id>" or "queued|<id>"
+mcp_claim() {
+  local pid="$1"
+  local instruction="${2:-}"
+  local workspace="${3:-}"
+
+  # Truncate + escape for safe SQL embedding
+  local safe_instr safe_ws
+  safe_instr=$(printf '%s' "$instruction" | cut -c1-200 | sed "s/'/''/g")
+  safe_ws=$(printf '%s' "$workspace" | sed "s/'/''/g")
+
+  local id
+  id=$(uuid)
+
+  # Recover dead PIDs outside the transaction — reduces lock contention.
+  mcp_recover
+
+  # BEGIN IMMEDIATE: serializes all writers; safe to count + insert atomically.
+  # The CTE evaluates capacity once so all three CASE columns see the same answer.
+  # Filter out PRAGMA echo (5000) — only keep the status|id line.
+  "$SQLITE" "$DB" 2>/dev/null <<SQL | grep -m1 -E '^(running|queued)\|'
+PRAGMA busy_timeout=5000;
+BEGIN IMMEDIATE;
+WITH capacity AS (
+  SELECT COUNT(*) < ${MCP_MAX_SLOTS} AS ok FROM mcp_slots WHERE status='running'
+)
+INSERT INTO mcp_slots (id, status, claimed_by, instruction, workspace, started_at)
+SELECT
+  '${id}',
+  CASE WHEN ok THEN 'running' ELSE 'queued' END,
+  CASE WHEN ok THEN ${pid}   ELSE NULL      END,
+  '${safe_instr}',
+  '${safe_ws}',
+  CASE WHEN ok THEN datetime('now') ELSE NULL END
+FROM capacity;
+COMMIT;
+SELECT status || '|' || id FROM mcp_slots WHERE id='${id}';
+SQL
+}
+
+# Called by the poller to promote the oldest queued slot to running (if capacity allows).
+# Output: "running|<id>|<instruction>|<workspace>" or empty string (nothing to do).
+mcp_next() {
+  local pid="$1"
+
+  # Always recover first — stale running rows reduce apparent free capacity.
+  mcp_recover
+
+  "$SQLITE" "$DB" 2>/dev/null <<SQL | grep -m1 -E '^running\|' || true
+PRAGMA busy_timeout=5000;
+BEGIN IMMEDIATE;
+UPDATE mcp_slots
+SET status='running', claimed_by=${pid}, started_at=datetime('now')
+WHERE id=(
+  SELECT id FROM mcp_slots WHERE status='queued'
+  ORDER BY queued_at ASC LIMIT 1
+)
+AND (SELECT COUNT(*) FROM mcp_slots WHERE status='running') < ${MCP_MAX_SLOTS}
+RETURNING 'running' || '|' || id || '|' || COALESCE(instruction,'') || '|' || COALESCE(workspace,'');
+COMMIT;
+SQL
+}
+
+mcp_done() {
+  local id="$1"
+  local result="${2:-}"
+  local safe_result
+  safe_result=$(printf '%s' "$result" | sed "s/'/''/g")
+  sql_raw "UPDATE mcp_slots SET status='done', result='${safe_result}', completed_at=datetime('now') WHERE id='${id}';"
+}
+
+mcp_failed() {
+  local id="$1"
+  local error="${2:-}"
+  local safe_error
+  safe_error=$(printf '%s' "$error" | sed "s/'/''/g")
+  sql_raw "UPDATE mcp_slots SET status='failed', error='${safe_error}', completed_at=datetime('now') WHERE id='${id}';"
+}
+
+mcp_result() {
+  local id="$1"
+  sql "SELECT id, status, result, error, instruction, workspace, queued_at, started_at, completed_at FROM mcp_slots WHERE id='${id}';"
+}
+
+mcp_list() {
+  local status="${1:-}"
+  if [ -n "$status" ]; then
+    sql "SELECT id, status, claimed_by, substr(instruction,1,60) as instruction_preview, queued_at, started_at, completed_at FROM mcp_slots WHERE status='${status}' ORDER BY queued_at DESC LIMIT 50;"
+  else
+    sql "SELECT id, status, claimed_by, substr(instruction,1,60) as instruction_preview, queued_at, started_at, completed_at FROM mcp_slots WHERE status IN ('queued','running') ORDER BY queued_at DESC LIMIT 50;"
+  fi
+}
+
+# ── STATS ─────────────────────────────────────────────────────────────────
+show_stats() {
+  echo "=== Tasks ==="
+  sql_raw "SELECT status, COUNT(*) as count FROM tasks GROUP BY status;"
+  echo ""
+  echo "=== Messages ==="
+  sql_raw "SELECT status, COUNT(*) as count FROM message_outbox GROUP BY status;"
+  echo ""
+  echo "=== Recent Runs ==="
+  sql_raw "SELECT status, COUNT(*) as count FROM runs WHERE started_at > datetime('now', '-24 hours') GROUP BY status;"
+  echo ""
+  echo "=== MCP Slots ==="
+  sql_raw "SELECT status, COUNT(*) as count FROM mcp_slots WHERE queued_at > datetime('now', '-24 hours') GROUP BY status;"
+}
+
+# ── MAIN ──────────────────────────────────────────────────────────────────
+CMD="${1:-}"
+SUB="${2:-}"
+
+case "$CMD" in
+  init) init_db ;;
+  task)
+    case "$SUB" in
+      create) task_create "${3:-}" "${4:-{}}" "${5:-manual}" "${6:-}" "${7:-0}" ;;
+      claim) task_claim "${3:-}" "${4:-}" ;;
+      update) task_update "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
+      heartbeat) task_heartbeat "${3:-}" ;;
+      list) task_list "${3:-}" ;;
+      *) echo "Usage: mechatron-db task create|claim|update|heartbeat|list" ;;
+    esac ;;
+  msg)
+    case "$SUB" in
+      save) msg_save "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
+      done) msg_done "${3:-}" ;;
+      fail) msg_fail "${3:-}" "${4:-}" ;;
+      pending) msg_pending ;;
+      catchup) msg_catchup ;;
+      *) echo "Usage: mechatron-db msg save|done|fail|pending|catchup" ;;
+    esac ;;
+  run)
+    case "$SUB" in
+      start) run_start "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
+      end) run_end "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
+      *) echo "Usage: mechatron-db run start|end" ;;
+    esac ;;
+  stalled) find_stalled ;;
+  recover) recover_stalled ;;
+  stats) show_stats ;;
+  # mcp-* commands: $1=cmd, $2=first_arg (pid or id or status), $3/$4=rest
+  mcp-claim)   mcp_claim   "${SUB:-$$}" "${3:-}" "${4:-}" ;;
+  mcp-next)    mcp_next    "${SUB:-$$}" ;;
+  mcp-done)    mcp_done    "${SUB:-}" "${3:-}" ;;
+  mcp-failed)  mcp_failed  "${SUB:-}" "${3:-}" ;;
+  mcp-result)  mcp_result  "${SUB:-}" ;;
+  mcp-recover) mcp_recover ;;
+  mcp-list)    mcp_list    "${SUB:-}" ;;
+  *)
+    echo "mechatron-db — SQLite task database for mechatron agents"
+    echo ""
+    echo "Usage:"
+    echo "  mechatron-db init                          Initialize database"
+    echo "  mechatron-db task create <type> <payload>  Create task"
+    echo "  mechatron-db task claim <agent> <types>    Claim next task"
+    echo "  mechatron-db task update <id> <status>     Update task"
+    echo "  mechatron-db task heartbeat <id>           Extend timeout"
+    echo "  mechatron-db task list [status]            List tasks"
+    echo "  mechatron-db msg save <ch> <user> <text>   Save pending message"
+    echo "  mechatron-db msg done <id>                 Mark delivered"
+    echo "  mechatron-db msg fail <id> <error>         Mark failed + backoff"
+    echo "  mechatron-db msg pending                   List pending messages"
+    echo "  mechatron-db stalled                       Find stalled tasks"
+    echo "  mechatron-db recover                       Re-queue stalled tasks"
+    echo "  mechatron-db stats                         Show stats"
+    echo ""
+    echo "  mechatron-db mcp-claim <pid> <instr> [ws]  Claim MCP slot or queue"
+    echo "  mechatron-db mcp-next <pid>                Promote oldest queued (poller)"
+    echo "  mechatron-db mcp-done <id> [result]        Mark MCP slot done"
+    echo "  mechatron-db mcp-failed <id> [error]       Mark MCP slot failed"
+    echo "  mechatron-db mcp-result <id>               Read MCP slot result (JSON)"
+    echo "  mechatron-db mcp-recover                   Reset slots with dead PIDs"
+    echo "  mechatron-db mcp-list [status]             List MCP slots"
+    ;;
+esac

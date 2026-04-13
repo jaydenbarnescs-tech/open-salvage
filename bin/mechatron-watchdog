@@ -1,0 +1,207 @@
+#!/opt/homebrew/bin/node
+'use strict';
+// mechatron-watchdog — Health monitor for mechatron services
+// Runs every 5 minutes via LaunchAgent. Checks critical services, auto-restarts if needed,
+// alerts on Slack only when it can't self-heal.
+//
+// OpenClaw pattern: 5-min check interval, max 10 restarts/hour, 10-min cooldown between restarts
+
+const { execSync, execFileSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const https = require('https');
+
+const HOME = process.env.HOME || '/Users/jayden.csai';
+const STATE_FILE = path.join(HOME, '.mechatron/watchdog-state.json');
+const LOG_FILE = path.join(HOME, 'claude-agent/logs/watchdog.log');
+const SLACK_TOKEN = process.env.SLACK_BOT_TOKEN || '';
+const JAYDEN_DM = 'D0AQW7VF4UA';
+
+const MAX_RESTARTS_PER_HOUR = 10;
+const COOLDOWN_MS = 600000; // 10 min between restarts of same service
+
+function log(msg) {
+  const line = `[${new Date().toISOString()}] ${msg}`;
+  console.log(line);
+  try { fs.appendFileSync(LOG_FILE, line + '\n'); } catch {}
+}
+
+function loadState() {
+  try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8')); }
+  catch { return { restarts: {}, lastAlert: 0, restartsThisHour: 0, hourStart: 0 }; }
+}
+
+function saveState(state) {
+  fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+}
+
+// ── Health Checks ────────────────────────────────────────────────────────
+function checkService(label) {
+  try {
+    const output = execSync(`launchctl list 2>/dev/null | grep "${label}"`, { encoding: 'utf-8' }).trim();
+    if (!output) return { status: 'not-loaded', pid: null };
+    const parts = output.split(/\s+/);
+    const pid = parts[0] === '-' ? null : parseInt(parts[0]);
+    const exitCode = parseInt(parts[1]);
+    if (pid) return { status: 'running', pid, exitCode };
+    if (exitCode === 0) return { status: 'stopped-clean', pid: null, exitCode };
+    return { status: 'crashed', pid: null, exitCode };
+  } catch { return { status: 'not-loaded', pid: null }; }
+}
+
+function checkClaudeBinary() {
+  const candidates = ['/opt/homebrew/bin/claude', path.join(HOME, 'bin/claude')];
+  for (const c of candidates) {
+    try {
+      const real = fs.realpathSync(c);
+      if (fs.existsSync(real)) return { status: 'ok', path: real };
+    } catch {}
+  }
+  return { status: 'broken', path: null };
+}
+
+function checkOAuthToken() {
+  const tokenFile = path.join(HOME, '.claude-setup-token');
+  try {
+    const content = fs.readFileSync(tokenFile, 'utf-8').trim();
+    if (content && content.length > 20) return { status: 'ok' };
+    return { status: 'invalid' };
+  } catch { return { status: 'missing' }; }
+}
+
+// ── Auto-Fix ─────────────────────────────────────────────────────────────
+function restartService(label, state) {
+  const now = Date.now();
+
+  // Reset hourly counter
+  if (now - (state.hourStart || 0) > 3600000) {
+    state.restartsThisHour = 0;
+    state.hourStart = now;
+  }
+
+  // Check limits
+  if (state.restartsThisHour >= MAX_RESTARTS_PER_HOUR) {
+    log(`BLOCKED: ${label} — max restarts/hour reached (${MAX_RESTARTS_PER_HOUR})`);
+    return false;
+  }
+
+  const lastRestart = state.restarts[label] || 0;
+  if (now - lastRestart < COOLDOWN_MS) {
+    log(`COOLDOWN: ${label} — restarted ${Math.round((now - lastRestart) / 1000)}s ago, need ${COOLDOWN_MS / 1000}s`);
+    return false;
+  }
+
+  try {
+    execSync(`launchctl kickstart gui/$(id -u)/${label}`, { timeout: 10000 });
+    state.restarts[label] = now;
+    state.restartsThisHour++;
+    log(`RESTARTED: ${label}`);
+    return true;
+  } catch (e) {
+    log(`RESTART FAILED: ${label} — ${e.message}`);
+    return false;
+  }
+}
+
+function fixClaudeBinary() {
+  const codeDir = path.join(HOME, 'Library/Application Support/Claude/claude-code');
+  try {
+    const versions = fs.readdirSync(codeDir).sort().reverse();
+    for (const v of versions) {
+      const bin = path.join(codeDir, v, 'claude.app/Contents/MacOS/claude');
+      if (fs.existsSync(bin)) {
+        try { fs.unlinkSync(path.join(HOME, 'bin/claude')); } catch {}
+        fs.symlinkSync(bin, path.join(HOME, 'bin/claude'));
+        try { fs.unlinkSync('/opt/homebrew/bin/claude'); } catch {}
+        try { fs.symlinkSync(bin, '/opt/homebrew/bin/claude'); } catch {}
+        log(`FIXED: Claude binary → ${v}`);
+        return true;
+      }
+    }
+  } catch {}
+  return false;
+}
+
+// ── Slack Alert (Tier 4: Human escalation) ───────────────────────────────
+function alertSlack(message) {
+  return new Promise((resolve) => {
+    const body = JSON.stringify({ channel: JAYDEN_DM, text: `:rotating_light: *Watchdog Alert*\n\n${message}` });
+    const req = https.request('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SLACK_TOKEN}`, 'Content-Length': Buffer.byteLength(body) },
+    }, (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d)); });
+    req.on('error', () => resolve(null));
+    req.write(body);
+    req.end();
+  });
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────
+async function main() {
+  const state = loadState();
+  const issues = [];
+  const fixed = [];
+
+  // Check critical services
+  const services = [
+    { label: 'ai.claude.slackbridge', name: 'Slack Bridge (Vanessa)' },
+    { label: 'ai.claude.linkedin-watcher-v2', name: 'LinkedIn Watcher' },
+    { label: 'com.mgc.whisper-server', name: 'Whisper Server' },
+  ];
+
+  for (const svc of services) {
+    const health = checkService(svc.label);
+    if (health.status === 'crashed' || health.status === 'not-loaded') {
+      log(`UNHEALTHY: ${svc.name} (${health.status}, exit: ${health.exitCode})`);
+      if (restartService(svc.label, state)) {
+        fixed.push(`${svc.name} — auto-restarted`);
+      } else {
+        issues.push(`${svc.name} is down and could not be restarted`);
+      }
+    }
+  }
+
+  // Check Claude binary
+  const binary = checkClaudeBinary();
+  if (binary.status === 'broken') {
+    log('UNHEALTHY: Claude binary broken');
+    if (fixClaudeBinary()) {
+      fixed.push('Claude binary — symlink auto-fixed');
+    } else {
+      issues.push('Claude CLI binary is missing and could not be fixed');
+    }
+  }
+
+  // Check OAuth token
+  const token = checkOAuthToken();
+  if (token.status !== 'ok') {
+    issues.push(`OAuth token ${token.status} — Vanessa cannot authenticate`);
+  }
+
+  // Save state
+  saveState(state);
+
+  // Report
+  if (fixed.length > 0) log(`AUTO-FIXED: ${fixed.join(', ')}`);
+  if (issues.length === 0 && fixed.length === 0) {
+    log('ALL HEALTHY');
+    return;
+  }
+
+  // Alert on Slack only for unresolved issues (not auto-fixed ones)
+  if (issues.length > 0) {
+    const now = Date.now();
+    // Don't spam — max 1 alert per 30 minutes
+    if (now - (state.lastAlert || 0) > 1800000) {
+      const msg = issues.map(i => `• ${i}`).join('\n') +
+        (fixed.length > 0 ? `\n\n_Auto-fixed: ${fixed.join(', ')}_` : '');
+      await alertSlack(msg);
+      state.lastAlert = now;
+      saveState(state);
+      log(`ALERTED: Slack DM sent`);
+    }
+  }
+}
+
+main().catch(e => log(`FATAL: ${e.message}`));

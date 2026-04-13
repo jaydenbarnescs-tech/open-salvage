@@ -1,0 +1,50 @@
+{
+  "mcpServers": {
+    "mgc-proxy": {
+      "command": "/opt/homebrew/opt/node/bin/npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://mgc-pass-proxy.duckdns.org/mcp"
+      ],
+      "env": {
+        "PATH": "/opt/homebrew/bin:/opt/homebrew/opt/node/bin:/usr/bin:/bin",
+        "HOME": "/Users/jayden.csai"
+      }
+    },
+    "slack": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-slack"
+      ],
+      "env": {
+        "SLACK_BOT_TOKEN": "YOUR_SLACK_BOT_TOKEN",
+        "SLACK_TEAM_ID": "T09DR0639PV"
+      }
+    },
+    "vercel": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://mcp.vercel.com/sse"
+      ],
+      "env": {
+        "PATH": "/opt/homebrew/bin:/opt/homebrew/opt/node/bin:/usr/bin:/bin",
+        "HOME": "/Users/jayden.csai"
+      }
+    },
+    "nanobanana-mcp": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@ycse/nanobanana-mcp"
+      ],
+      "env": {
+        "GOOGLE_AI_API_KEY": "YOUR_GOOGLE_AI_API_KEY",
+        "NANOBANANA_MODEL": "gemini-3.1-flash-image-preview"
+      }
+    }
+  }
+}

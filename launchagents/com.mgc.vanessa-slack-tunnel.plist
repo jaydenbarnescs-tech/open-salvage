@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mgc.vanessa-slack-tunnel</string>
+
+    <!-- Reverse tunnel: Oracle port 9091 → this Mac port 3100             -->
+    <!-- So when Oracle nginx hits localhost:9091, it reaches Mac:3100      -->
+    <!-- which is the Vanessa dispatcher HTTP server                        -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/ssh</string>
+        <string>-R</string>
+        <string>9091:localhost:3100</string>
+        <string>-N</string>
+        <string>-o</string>
+        <string>ServerAliveInterval=30</string>
+        <string>-o</string>
+        <string>ServerAliveCountMax=3</string>
+        <string>-o</string>
+        <string>ExitOnForwardFailure=yes</string>
+        <string>ubuntu@64.110.107.203</string>
+        <string>-i</string>
+        <string>/Users/jayden.csai/.ssh/ssh-key-2026-03-20.key</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/jayden.csai/claude-agent/logs/slack-tunnel.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jayden.csai/claude-agent/logs/slack-tunnel.log</string>
+
+    <!-- Restart throttle: don't hammer SSH if Oracle is down -->
+    <key>ThrottleInterval</key>
+    <integer>15</integer>
+</dict>
+</plist>

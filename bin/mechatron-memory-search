@@ -1,0 +1,228 @@
+#!/opt/homebrew/bin/node
+'use strict';
+// mechatron-memory-search — Hybrid search: vector similarity (70%) + FTS5 text (30%)
+// Usage: mechatron-memory-search <workspace> <query> [--max-results N] [--text-only]
+// Matches OpenClaw's hybrid search weights: vectorWeight 0.7, textWeight 0.3
+
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
+const http = require('http');
+
+const HOME = process.env.HOME || '/Users/jayden.csai';
+const WORKSPACE = process.argv[2];
+const QUERY = process.argv[3];
+if (!WORKSPACE || !QUERY) { console.error('Usage: mechatron-memory-search <workspace> <query>'); process.exit(1); }
+
+let MAX_RESULTS = 6;
+let TEXT_ONLY = false;
+for (let i = 4; i < process.argv.length; i++) {
+  if (process.argv[i] === '--max-results') MAX_RESULTS = parseInt(process.argv[++i]) || 6;
+  if (process.argv[i] === '--text-only') TEXT_ONLY = true;
+}
+
+const DB_PATH = path.join(WORKSPACE, 'sessions', 'memory.db');
+const EMBED_MODEL = 'bge-m3';
+const OLLAMA_URL = 'http://localhost:11434';
+const VECTOR_WEIGHT = 0.7;
+const TEXT_WEIGHT = 0.3;
+
+function sql(query) {
+  return execFileSync('/usr/bin/sqlite3', ['-json', DB_PATH], { input: query, encoding: 'utf-8', timeout: 10000 });
+}
+
+function getEmbedding(text) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({ model: EMBED_MODEL, prompt: text });
+    const req = http.request(`${OLLAMA_URL}/api/embeddings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      timeout: 15000,
+    }, (res) => {
+      let data = '';
+      res.on('data', d => data += d);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.embedding) resolve(parsed.embedding);
+          else reject(new Error('No embedding'));
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    req.write(body);
+    req.end();
+  });
+}
+
+function cosineSimilarity(a, b) {
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+// Read embedding blob from SQLite and parse to float32 array
+function parseEmbeddingHex(hexStr) {
+  const buf = Buffer.from(hexStr, 'hex');
+  const floats = [];
+  for (let i = 0; i < buf.length; i += 4) floats.push(buf.readFloatLE(i));
+  return floats;
+}
+
+async function vectorSearch(queryEmbedding) {
+  // Get all chunks with embeddings
+  const raw = sql(`SELECT id, file_path, start_line, content, hex(embedding) as emb_hex FROM chunks WHERE embedding IS NOT NULL;`);
+  let rows;
+  try { rows = JSON.parse(raw); } catch { return []; }
+
+  // Compute cosine similarity for each chunk
+  const scored = rows.map(row => {
+    const chunkEmb = parseEmbeddingHex(row.emb_hex);
+    const score = cosineSimilarity(queryEmbedding, chunkEmb);
+    return { ...row, vectorScore: score };
+  });
+
+  // Sort by score descending, take top candidates
+  scored.sort((a, b) => b.vectorScore - a.vectorScore);
+  return scored.slice(0, MAX_RESULTS * 4); // 4x candidates for re-ranking (OpenClaw pattern)
+}
+
+function ftsSearch() {
+  const safeQuery = QUERY.replace(/"/g, '');
+  // Try exact phrase first, then individual terms
+  let raw = sql(`SELECT c.id, c.file_path, c.start_line, snippet(chunks_fts, 0, '【', '】', '...', 32) as snippet, rank FROM chunks_fts JOIN chunks c ON chunks_fts.rowid = c.id WHERE chunks_fts MATCH '"${safeQuery}"' ORDER BY rank LIMIT ${MAX_RESULTS * 4};`);
+  let rows;
+  try { rows = JSON.parse(raw); } catch { rows = []; }
+
+  if (rows.length === 0) {
+    const termsQuery = safeQuery.split(/\s+/).join(' OR ');
+    raw = sql(`SELECT c.id, c.file_path, c.start_line, snippet(chunks_fts, 0, '【', '】', '...', 32) as snippet, rank FROM chunks_fts JOIN chunks c ON chunks_fts.rowid = c.id WHERE chunks_fts MATCH '${termsQuery}' ORDER BY rank LIMIT ${MAX_RESULTS * 4};`);
+    try { rows = JSON.parse(raw); } catch { rows = []; }
+  }
+
+  return rows;
+}
+
+function hybridRank(vectorResults, ftsResults) {
+  const scoreMap = new Map(); // id → { vectorScore, ftsScore, ... }
+
+  // Normalize vector scores to 0-1
+  if (vectorResults.length > 0) {
+    const maxV = vectorResults[0].vectorScore;
+    const minV = vectorResults[vectorResults.length - 1]?.vectorScore || 0;
+    const rangeV = maxV - minV || 1;
+    for (const r of vectorResults) {
+      scoreMap.set(r.id, {
+        id: r.id,
+        file_path: r.file_path,
+        start_line: r.start_line,
+        content: r.content,
+        vectorScore: (r.vectorScore - minV) / rangeV,
+        ftsScore: 0,
+        snippet: r.content.slice(0, 200),
+      });
+    }
+  }
+
+  // Normalize FTS scores (rank is negative, more negative = better)
+  if (ftsResults.length > 0) {
+    const ranks = ftsResults.map(r => Math.abs(r.rank || 0));
+    const maxR = Math.max(...ranks) || 1;
+    for (const r of ftsResults) {
+      const ftsNorm = Math.abs(r.rank || 0) / maxR;
+      if (scoreMap.has(r.id)) {
+        scoreMap.get(r.id).ftsScore = ftsNorm;
+        scoreMap.get(r.id).snippet = r.snippet || scoreMap.get(r.id).snippet;
+      } else {
+        scoreMap.set(r.id, {
+          id: r.id,
+          file_path: r.file_path,
+          start_line: r.start_line,
+          content: '',
+          vectorScore: 0,
+          ftsScore: ftsNorm,
+          snippet: r.snippet || '',
+        });
+      }
+    }
+  }
+
+  // Combine with OpenClaw weights
+  const combined = Array.from(scoreMap.values()).map(r => ({
+    ...r,
+    hybridScore: (r.vectorScore * VECTOR_WEIGHT) + (r.ftsScore * TEXT_WEIGHT),
+  }));
+
+  combined.sort((a, b) => b.hybridScore - a.hybridScore);
+  return combined.slice(0, MAX_RESULTS);
+}
+
+async function main() {
+  if (!fs.existsSync(DB_PATH)) {
+    console.log('No memory index found. Run: mechatron-memory-index ' + WORKSPACE);
+    process.exit(0);
+  }
+
+  // Auto-reindex before searching
+  try {
+    execFileSync('/opt/homebrew/bin/node', [path.join(HOME, 'bin/mechatron-memory-index'), WORKSPACE], {
+      encoding: 'utf-8', timeout: 30000, stdio: ['ignore', 'ignore', 'ignore'],
+    });
+  } catch {}
+
+  let queryEmbedding = null;
+  let vectorResults = [];
+  let ftsResults = [];
+
+  // Vector search
+  if (!TEXT_ONLY) {
+    try {
+      queryEmbedding = await getEmbedding(QUERY);
+      vectorResults = await vectorSearch(queryEmbedding);
+    } catch {
+      // Ollama not available, fall back to text-only
+    }
+  }
+
+  // FTS search
+  try { ftsResults = ftsSearch(); } catch {}
+
+  // Hybrid ranking
+  let results;
+  if (vectorResults.length > 0 && ftsResults.length > 0) {
+    results = hybridRank(vectorResults, ftsResults);
+    console.log(`=== Hybrid Search (vector ${Math.round(VECTOR_WEIGHT*100)}% + text ${Math.round(TEXT_WEIGHT*100)}%) for: ${QUERY} ===\n`);
+  } else if (vectorResults.length > 0) {
+    results = vectorResults.slice(0, MAX_RESULTS).map(r => ({ ...r, hybridScore: r.vectorScore, snippet: r.content.slice(0, 200) }));
+    console.log(`=== Vector Search for: ${QUERY} ===\n`);
+  } else if (ftsResults.length > 0) {
+    results = ftsResults.slice(0, MAX_RESULTS).map(r => ({ ...r, hybridScore: 1, snippet: r.snippet }));
+    console.log(`=== Text Search (FTS5) for: ${QUERY} ===\n`);
+  } else {
+    // Fallback to grep
+    console.log(`No indexed matches. Falling back to grep...\n`);
+    try {
+      const grepResult = execFileSync('grep', ['-r', '-n', '-i', '-C', '2', QUERY, path.join(WORKSPACE, 'memory'), path.join(WORKSPACE, 'MEMORY.md')], {
+        encoding: 'utf-8', timeout: 5000,
+      });
+      console.log(grepResult.slice(0, 2000));
+    } catch { console.log(`No matches found for: ${QUERY}`); }
+    return;
+  }
+
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    const relPath = (r.file_path || '').replace(WORKSPACE + '/', '');
+    const score = r.hybridScore.toFixed(3);
+    console.log(`[${i+1}] ${relPath}:${r.start_line} (score: ${score})`);
+    console.log(`    ${(r.snippet || '').replace(/\n/g, ' ').trim().slice(0, 200)}`);
+    console.log('');
+  }
+}
+
+main().catch(e => { console.error(`Error: ${e.message}`); process.exit(1); });

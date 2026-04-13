@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mgc.mac-proxy-tunnel</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/ssh</string>
+        <string>-R</string>
+        <string>9090:localhost:8081</string>
+        <string>-N</string>
+        <string>-o</string>
+        <string>ServerAliveInterval=30</string>
+        <string>-o</string>
+        <string>ExitOnForwardFailure=yes</string>
+        <string>ubuntu@64.110.107.203</string>
+        <string>-i</string>
+        <string>/Users/jayden.csai/.ssh/ssh-key-2026-03-20.key</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/jayden.csai/mgc-mac-proxy/tunnel-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jayden.csai/mgc-mac-proxy/tunnel-stderr.log</string>
+</dict>
+</plist>

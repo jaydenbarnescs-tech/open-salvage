@@ -1,0 +1,94 @@
+{
+  "version": "1.0",
+  "tools": [
+    {
+      "name": "worksheet",
+      "command": "~/bin/worksheet",
+      "args": ["<activity description>"],
+      "description": "Creates printable A4 coloring/activity worksheets for Yuina (4yo). Generates images with FLUX AI locally via ComfyUI, assembles into a worksheet with title, instructions, labels, and borders. Saves PNG to Desktop.",
+      "examples": [
+        "worksheet \"animals driving cars matching activity\"",
+        "worksheet \"counting fruit 1-5\"",
+        "worksheet \"ocean animals coloring page\""
+      ]
+    },
+    {
+      "name": "organise-files.sh",
+      "command": "~/bin/organise-files.sh",
+      "args": [],
+      "description": "Sorts files in Desktop and Downloads into organized folders by type. Runs automatically at 5am via LaunchAgent.",
+      "examples": ["organise-files.sh"]
+    },
+    {
+      "name": "voice-bubble.py",
+      "command": "python3 ~/bin/voice-bubble.py",
+      "args": [],
+      "description": "Floating mic button for voice recording. Records audio, transcribes via Whisper, saves to Obsidian vault as voice note.",
+      "examples": ["python3 ~/bin/voice-bubble.py"]
+    },
+    {
+      "name": "whisper-record.sh",
+      "command": "~/bin/whisper-record.sh",
+      "args": [],
+      "description": "Records audio from microphone and transcribes via local Whisper server.",
+      "examples": ["whisper-record.sh"]
+    },
+    {
+      "name": "mechatron-memory-search",
+      "command": "mechatron-memory-search",
+      "args": ["<workspace>", "<query>"],
+      "description": "Hybrid search (70% vector + 30% text) across workspace memory files. Uses SQLite FTS5 + bge-m3 embeddings via Ollama.",
+      "examples": [
+        "mechatron-memory-search ~/.openclaw/workspace \"RENPHO project\"",
+        "mechatron-memory-search ~/clawd \"last meeting notes\""
+      ]
+    },
+    {
+      "name": "mechatron-memory-index",
+      "command": "mechatron-memory-index",
+      "args": ["<workspace>"],
+      "description": "Index workspace memory files into SQLite FTS5 with bge-m3 vector embeddings. Run before searching.",
+      "examples": ["mechatron-memory-index ~/.openclaw/workspace"]
+    },
+    {
+      "name": "mechatron-cron",
+      "command": "mechatron-cron",
+      "args": ["list|add|remove|run|status", "..."],
+      "description": "Manage mechatron scheduled jobs via macOS LaunchAgents. Create, remove, list, run, and check status of cron jobs.",
+      "examples": [
+        "mechatron-cron list",
+        "mechatron-cron add daily-report --schedule '0 9 * * *' --task general -- -p 'Generate daily report'"
+      ]
+    },
+    {
+      "name": "mechatron-tools",
+      "command": "mechatron-tools",
+      "args": ["<workspace>", "<instruction>"],
+      "description": "On-demand MCP tool execution. Spawns sub-agent with full MCP access (Notion, n8n, Slack, server, etc.) for one-shot tool tasks.",
+      "examples": [
+        "mechatron-tools ~/clawd \"Read Notion page for RENPHO\"",
+        "mechatron-tools ~/clawd \"List active n8n workflows\""
+      ]
+    },
+    {
+      "name": "mechatron-spawn",
+      "command": "mechatron-spawn",
+      "args": ["<workspace>", "<task-json or instruction>"],
+      "description": "Spawn focused sub-agents for parallel/sequential task execution. Max 3 tasks per call, 60s timeout each, depth limit 1 (sub-agents cannot spawn more). Returns structured JSON results.",
+      "examples": [
+        "mechatron-spawn ~/clawd '{\"tasks\":[{\"id\":\"t1\",\"instruction\":\"Research RENPHO competitors\"},{\"id\":\"t2\",\"instruction\":\"Draft outreach email template\"}]}'",
+        "mechatron-spawn ~/clawd \"Summarize the latest Slack messages in #mgc-all\" --parallel"
+      ]
+    },
+    {
+      "name": "mechatron-ingest",
+      "command": "mechatron-ingest",
+      "args": ["<workspace>", "--source slack|notion|sessions|all"],
+      "description": "Pull knowledge from Slack, Notion, Claude sessions into workspace memory for RAG indexing. Run periodically to keep memory fresh.",
+      "examples": [
+        "mechatron-ingest ~/clawd --source slack --reindex",
+        "mechatron-ingest ~/clawd --source all"
+      ]
+    }
+  ]
+}

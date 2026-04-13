@@ -1,0 +1,199 @@
+#!/opt/homebrew/bin/node
+'use strict';
+// mechatron-memory-index — Index workspace memory files into SQLite FTS5 + vector embeddings
+// Usage: mechatron-memory-index <workspace> [--no-vectors]
+// Creates/updates {workspace}/sessions/memory.db
+
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
+const crypto = require('crypto');
+const http = require('http');
+
+const WORKSPACE = process.argv[2];
+if (!WORKSPACE) { console.error('Usage: mechatron-memory-index <workspace> [--no-vectors]'); process.exit(1); }
+
+const NO_VECTORS = process.argv.includes('--no-vectors');
+const DB_PATH = path.join(WORKSPACE, 'sessions', 'memory.db');
+const CHUNK_CHARS = 1400;
+const OVERLAP_CHARS = 280;
+const EMBED_MODEL = 'bge-m3';
+const EMBED_DIMS = 1024;
+const OLLAMA_URL = 'http://localhost:11434';
+
+function log(msg) { process.stderr.write(`[memory-index] ${new Date().toISOString()} ${msg}\n`); }
+
+function discoverFiles() {
+  const files = [];
+  const memoryMd = path.join(WORKSPACE, 'MEMORY.md');
+  if (fs.existsSync(memoryMd)) files.push(memoryMd);
+  // Scan memory/ and all subdirectories (memory/ingested/, etc.)
+  function scanDir(dir) {
+    if (!fs.existsSync(dir)) return;
+    for (const f of fs.readdirSync(dir).sort().reverse()) {
+      const fp = path.join(dir, f);
+      try {
+        const stat = fs.statSync(fp);
+        if (stat.isDirectory()) { scanDir(fp); continue; }
+        if (f.endsWith('.md') || f.endsWith('.json')) files.push(fp);
+      } catch {}
+    }
+  }
+  scanDir(path.join(WORKSPACE, 'memory'));
+  return files;
+}
+
+function chunkText(text, filePath) {
+  const chunks = [];
+  if (text.length <= CHUNK_CHARS) {
+    chunks.push({ text, startLine: 0, filePath, chunkIdx: 0 });
+    return chunks;
+  }
+  let offset = 0, chunkIdx = 0;
+  while (offset < text.length) {
+    const end = Math.min(offset + CHUNK_CHARS, text.length);
+    const startLine = text.slice(0, offset).split('\n').length - 1;
+    chunks.push({ text: text.slice(offset, end), startLine, filePath, chunkIdx });
+    offset += CHUNK_CHARS - OVERLAP_CHARS;
+    chunkIdx++;
+    if (end >= text.length) break;
+  }
+  return chunks;
+}
+
+function sql(query) {
+  return execFileSync('/usr/bin/sqlite3', [DB_PATH], { input: query, encoding: 'utf-8', timeout: 10000 });
+}
+
+function initDb() {
+  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+  sql(`
+    CREATE TABLE IF NOT EXISTS chunks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      file_path TEXT NOT NULL,
+      file_hash TEXT NOT NULL,
+      start_line INTEGER NOT NULL,
+      chunk_idx INTEGER DEFAULT 0,
+      content TEXT NOT NULL,
+      embedding BLOB,
+      updated_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+      content, content='chunks', content_rowid='id', tokenize='unicode61'
+    );
+    CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+      INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
+    END;
+    CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+      INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, old.content);
+    END;
+    CREATE TABLE IF NOT EXISTS file_state (
+      file_path TEXT PRIMARY KEY, file_hash TEXT NOT NULL,
+      indexed_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+  // Add embedding column if missing (migration for existing DBs)
+  try { sql(`ALTER TABLE chunks ADD COLUMN embedding BLOB;`); } catch {}
+}
+
+function needsReindex(filePath, contentHash) {
+  try {
+    return sql(`SELECT file_hash FROM file_state WHERE file_path = '${filePath.replace(/'/g, "''")}';`).trim() !== contentHash;
+  } catch { return true; }
+}
+
+// Get embedding from Ollama
+function getEmbedding(text) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({ model: EMBED_MODEL, prompt: text });
+    const req = http.request(`${OLLAMA_URL}/api/embeddings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      timeout: 30000,
+    }, (res) => {
+      let data = '';
+      res.on('data', d => data += d);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.embedding) resolve(parsed.embedding);
+          else reject(new Error('No embedding in response'));
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('Embedding timeout')); });
+    req.write(body);
+    req.end();
+  });
+}
+
+// Serialize float32 array to hex blob for SQLite
+function embeddingToHex(embedding) {
+  const buf = Buffer.alloc(embedding.length * 4);
+  for (let i = 0; i < embedding.length; i++) buf.writeFloatLE(embedding[i], i * 4);
+  return buf.toString('hex');
+}
+
+async function indexFile(filePath) {
+  const content = fs.readFileSync(filePath, 'utf-8');
+  const contentHash = crypto.createHash('sha256').update(content).digest('hex').slice(0, 16);
+  if (!needsReindex(filePath, contentHash)) return false;
+
+  const escapedPath = filePath.replace(/'/g, "''");
+  sql(`DELETE FROM chunks WHERE file_path = '${escapedPath}';`);
+
+  const chunks = chunkText(content, filePath);
+  for (const chunk of chunks) {
+    let embeddingHex = null;
+    if (!NO_VECTORS) {
+      try {
+        const emb = await getEmbedding(chunk.text);
+        embeddingHex = embeddingToHex(emb);
+      } catch (e) {
+        log(`WARNING: Embedding failed for chunk ${chunk.chunkIdx}: ${e.message}`);
+      }
+    }
+
+    const escapedContent = chunk.text.replace(/'/g, "''");
+    const embValue = embeddingHex ? `X'${embeddingHex}'` : 'NULL';
+    sql(`INSERT INTO chunks (file_path, file_hash, start_line, chunk_idx, content, embedding) VALUES ('${escapedPath}', '${contentHash}', ${chunk.startLine}, ${chunk.chunkIdx}, '${escapedContent}', ${embValue});`);
+  }
+
+  sql(`INSERT OR REPLACE INTO file_state (file_path, file_hash) VALUES ('${escapedPath}', '${contentHash}');`);
+  return true;
+}
+
+async function main() {
+  try {
+    initDb();
+
+    // Check Ollama availability for vectors
+    if (!NO_VECTORS) {
+      try {
+        await getEmbedding('test');
+        log(`Embedding model: ${EMBED_MODEL} (${EMBED_DIMS} dims)`);
+      } catch {
+        log('WARNING: Ollama not available. Indexing without vectors (FTS5 only).');
+      }
+    }
+
+    const files = discoverFiles();
+    let indexed = 0, skipped = 0;
+
+    for (const f of files) {
+      if (await indexFile(f)) {
+        indexed++;
+        log(`Indexed: ${path.relative(WORKSPACE, f)}`);
+      } else {
+        skipped++;
+      }
+    }
+    log(`Done. ${indexed} indexed, ${skipped} unchanged. ${files.length} total.`);
+  } catch (e) {
+    log(`ERROR: ${e.message}`);
+    process.exit(1);
+  }
+}
+
+main();

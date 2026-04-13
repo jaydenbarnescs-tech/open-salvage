@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mgc.vanessa-dispatcher</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/opt/node/bin/node</string>
+        <string>/Users/jayden.csai/claude-agent/dispatcher.js</string>
+    </array>
+
+    <!-- Keep alive: restart immediately if it crashes -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/jayden.csai/claude-agent/logs/dispatcher.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jayden.csai/claude-agent/logs/dispatcher.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/jayden.csai/claude-agent</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/jayden.csai/bin:/opt/homebrew/opt/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/jayden.csai</string>
+        <key>NODE_ENV</key>
+        <string>production</string>
+        <key>SLACK_SIGNING_SECRET</key>
+        <string>7a5433e6ce3c2a7fd07b3445b7128dd9</string>
+    </dict>
+
+    <!-- Throttle restart to avoid rapid crash loops (30s minimum between starts) -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- Fix 5: Nightly restart at 04:00 JST = 19:00 UTC to clear V8 heap fragmentation -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>19</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+</dict>
+</plist>

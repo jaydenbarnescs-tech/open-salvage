@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mechatron.cron.linkedin-strategy</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jayden.csai/bin/mechatron</string>
+        <string>--task</string>
+        <string>general</string>
+        <string>--workspace</string>
+        <string>/Users/jayden.csai/clawd</string>
+        <string>--fresh</string>
+        <string>Run linkedin-content skill Mode 0: Pick 1 strategy topic. Write long-form LinkedIn draft (500-800 words).</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Minute</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>7</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Users/jayden.csai/claude-agent/logs/cron-linkedin-strategy.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jayden.csai/claude-agent/logs/cron-linkedin-strategy.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/jayden.csai/bin</string>
+        <key>HOME</key>
+        <string>/Users/jayden.csai</string>
+    </dict>
+</dict>
+</plist>

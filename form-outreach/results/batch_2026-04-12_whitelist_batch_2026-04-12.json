@@ -1,0 +1,81 @@
+{
+  "summary": {
+    "total": 6,
+    "success": 6,
+    "errors": 0
+  },
+  "results": [
+    {
+      "timestamp": "2026-04-12T12:39:05.829Z",
+      "company": "Wismettac Asian Foods",
+      "website": "https://wismettacusa.com",
+      "formUrl": "https://wismettacusa.com/general-inquiry/",
+      "fieldsFilled": 8,
+      "submitted": true,
+      "mode": "LIVE",
+      "status": "ok",
+      "error": null,
+      "note": "LIVE — submitted"
+    },
+    {
+      "timestamp": "2026-04-12T12:40:10.324Z",
+      "company": "Mutual Trading Co.",
+      "website": "https://lamtc.com",
+      "formUrl": "https://lamtc.com/contact-us/",
+      "fieldsFilled": 6,
+      "submitted": false,
+      "mode": "LIVE",
+      "status": "ok",
+      "error": null,
+      "note": "LIVE — submit error: elementHandle.click: Timeout 30000ms exceeded.\nCall log:\n  - attempting click action\n    2 × waiting for element to be visible, enabled and stable\n      - element is not visible\n    - retrying click action\n    - waiting 20ms\n    2 × waiting for element to be visible, enabled and stable\n      - element is not visible\n    - retrying click action\n      - waiting 100ms\n    55 × waiting for element to be visible, enabled and stable\n       - element is not visible\n     - retrying click action\n       - waiting 500ms\n"
+    },
+    {
+      "timestamp": "2026-04-12T12:40:34.688Z",
+      "company": "ICREST USA",
+      "website": "https://icrestusa.com",
+      "formUrl": "https://www.icrestusa.com/contact",
+      "fieldsFilled": 4,
+      "submitted": true,
+      "mode": "LIVE",
+      "status": "ok",
+      "error": null,
+      "note": "LIVE — submitted"
+    },
+    {
+      "timestamp": "2026-04-12T12:41:36.890Z",
+      "company": "Foodex Group",
+      "website": "https://foodex-group.eu",
+      "formUrl": "https://foodex-group.eu/contact/#form",
+      "fieldsFilled": 4,
+      "submitted": false,
+      "mode": "LIVE",
+      "status": "ok",
+      "error": null,
+      "note": "LIVE — submit error: elementHandle.click: Timeout 30000ms exceeded.\nCall log:\n  - attempting click action\n    - waiting for element to be visible, enabled and stable\n    - element is visible, enabled and stable\n    - scrolling into view if needed\n    - done scrolling\n    - <div lang=\"fr\" role=\"region\" data-nosnippet=\"true\" id=\"tarteaucitronRoot\" aria-labelledby=\"tac_title\" class=\"tarteaucitronBeforeVisible\">…</div> intercepts pointer events\n  - retrying click action\n    - waiting for element to be visible, enabled and stable\n    - element is visible, enabled and stable\n    - scrolling into view if needed\n    - done scrolling\n    - <div id=\"popup-newsletter\" class=\"popup-newleter\">…</div> intercepts pointer events\n  - retrying click action\n    - waiting 20ms\n    2 × waiting for element to be visible, enabled and stable\n      - element is visible, enabled and stable\n      - scrolling into view if needed\n      - done scrolling\n      - <div lang=\"fr\" role=\"region\" data-nosnippet=\"true\" id=\"tarteaucitronRoot\" aria-labelledby=\"tac_title\" class=\"tarteaucitronBeforeVisible\">…</div> intercepts pointer events\n    - retrying click action\n      - waiting 100ms\n    13 × waiting for element to be visible, enabled and stable\n       - element is visible, enabled and stable\n       - scrolling into view if needed\n       - done scrolling\n       - <div lang=\"fr\" role=\"region\" data-nosnippet=\"true\" id=\"tarteaucitronRoot\" aria-labelledby=\"tac_title\" class=\"tarteaucitronBeforeVisible\">…</div> intercepts pointer events\n     - retrying click action\n       - waiting 500ms\n       - waiting for element to be visible, enabled and stable\n       - element is visible, enabled and stable\n       - scrolling into view if needed\n       - done scrolling\n       - <div id=\"popup-newsletter\" class=\"popup-newleter\">…</div> intercepts pointer events\n     - retrying click action\n       - waiting 500ms\n       - waiting for element to be visible, enabled and stable\n       - element is visible, enabled and stable\n       - scrolling into view if needed\n       - done scrolling\n       - <div lang=\"fr\" role=\"region\" data-nosnippet=\"true\" id=\"tarteaucitronRoot\" aria-labelledby=\"tac_title\" class=\"tarteaucitronBeforeVisible\">…</div> intercepts pointer events\n     - retrying click action\n       - waiting 500ms\n       - waiting for element to be visible, enabled and stable\n       - element is visible, enabled and stable\n       - scrolling into view if needed\n       - done scrolling\n       - <div lang=\"fr\" role=\"region\" data-nosnippet=\"true\" id=\"tarteaucitronRoot\" aria-labelledby=\"tac_title\" class=\"tarteaucitronBeforeVisible\">…</div> intercepts pointer events\n     - retrying click action\n       - waiting 500ms\n    - waiting for element to be visible, enabled and stable\n    - element is visible, enabled and stable\n    - scrolling into view if needed\n    - done scrolling\n    - <div lang=\"fr\" role=\"region\" data-nosnippet=\"true\" id=\"tarteaucitronRoot\" aria-labelledby=\"tac_title\" class=\"tarteaucitronBeforeVisible\">…</div> intercepts pointer events\n  - retrying click action\n    - waiting 500ms\n    - waiting for element to be visible, enabled and stable\n    - element is visible, enabled and stable\n    - scrolling into view if needed\n    - done scrolling\n    - <div id=\"popup-newsletter\" class=\"popup-newleter\">…</div> intercepts pointer events\n  - retrying click action\n    - waiting 500ms\n"
+    },
+    {
+      "timestamp": "2026-04-12T12:41:56.232Z",
+      "company": "Tazaki Foods",
+      "website": "https://tazakifoods.com",
+      "formUrl": "https://www.tazakifoods.com/contact",
+      "fieldsFilled": 7,
+      "submitted": true,
+      "mode": "LIVE",
+      "status": "ok",
+      "error": null,
+      "note": "LIVE — submitted"
+    },
+    {
+      "timestamp": "2026-04-12T12:42:55.153Z",
+      "company": "Yoigokochi",
+      "website": "https://yoigokochi.eu",
+      "formUrl": "https://yoigokochi.eu/pages/contact",
+      "fieldsFilled": 4,
+      "submitted": false,
+      "mode": "LIVE",
+      "status": "ok",
+      "error": null,
+      "note": "LIVE — submit error: elementHandle.click: Timeout 30000ms exceeded.\nCall log:\n  - attempting click action\n    2 × waiting for element to be visible, enabled and stable\n      - element is not visible\n    - retrying click action\n    - waiting 20ms\n    2 × waiting for element to be visible, enabled and stable\n      - element is not visible\n    - retrying click action\n      - waiting 100ms\n    52 × waiting for element to be visible, enabled and stable\n       - element is not visible\n     - retrying click action\n       - waiting 500ms\n"
+    }
+  ]
+}

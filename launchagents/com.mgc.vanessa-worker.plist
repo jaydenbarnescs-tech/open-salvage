@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mgc.vanessa-worker</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/opt/node/bin/node</string>
+        <string>/Users/jayden.csai/claude-agent/vanessa-worker.js</string>
+    </array>
+
+    <!-- Keep alive: restart if it exits (PID lockfile prevents double-start) -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/jayden.csai/claude-agent/logs/worker.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jayden.csai/claude-agent/logs/worker.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/jayden.csai/claude-agent</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/jayden.csai/bin:/opt/homebrew/opt/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/jayden.csai</string>
+        <key>NODE_ENV</key>
+        <string>production</string>
+    </dict>
+
+    <!-- Throttle restart to avoid rapid crash loops (30s between starts) -->
+    <!-- PID lockfile ensures only 1 worker ever runs even across rapid restarts -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+</dict>
+</plist>

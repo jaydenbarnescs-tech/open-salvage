@@ -1,16 +1,16 @@
 ---
 name: overseas-buyer-outreach
 description: >
-  Automated daily B2B outreach to overseas companies that could buy or distribute Japanese products.
-  MGC acts as a Japan-based sourcing/trading partner. Finds companies via web research,
-  discovers contact emails, generates personalized pitches, sends via n8n SMTP, and logs results.
+  Automated daily B2B outreach to overseas companies that buy or distribute Japanese products.
+  MGC acts as a Japan-based sourcing/trading partner. Uses high-quality lead sources (ImportYeti,
+  trade show lists, Amazon seller research) to find verified buyers — not generic Google searches.
   Trigger: "run outreach", "send buyer emails", "overseas-buyer-outreach", or cron schedule.
 ---
 
 # Overseas Buyer Outreach — Daily B2B Email Campaign
 
-MGC sources and supplies Japanese products to overseas buyers. This skill runs the daily outreach pipeline:
-research → contact discovery → email generation → send → log.
+MGC sources and supplies Japanese products to overseas buyers. Pipeline:
+lead discovery → contact enrichment → personalized email → send → log.
 
 ## Sender Info
 - **Name**: Jayden Barnes
@@ -19,16 +19,18 @@ research → contact discovery → email generation → send → log.
 - **Company**: MGC inc. (Japan-based trading & sourcing company)
 
 ## MGC Value Proposition
-MGC is a Japan-based trading company that sources high-quality Japanese products (health & wellness,
-beauty, food & beverage, industrial tools, crafts) and supplies them to overseas distributors,
-retailers, and Amazon/eCommerce sellers. We handle sourcing, QC, export documentation, and logistics.
+- Factory-direct pricing from Japanese manufacturers (no middlemen)
+- No MOQ on first order — sample before committing ← **use this hook always**
+- English support throughout + we handle export/customs paperwork
+- Non-Alibaba sourcing: regional artisan brands, small-batch producers
+- Exclusive distribution rights available for smaller brands
 
 ## Email Webhook
 **POST** `https://mgc-pass-proxy.duckdns.org/n8n/webhook/overseas-buyer-email`
 ```json
 {
   "to": "contact@company.com",
-  "subject": "Japanese [category] products for [Company]",
+  "subject": "Japanese [category] — [Company Name]",
   "body": "plain text email body",
   "body_html": "<p>HTML version</p>",
   "company": "Company Name"
@@ -40,110 +42,174 @@ retailers, and Amazon/eCommerce sellers. We handle sourcing, QC, export document
 - Skip companies already in `logs/sent.json`
 - Run once per day via cron
 
-## Target Profile
-Overseas companies (US, UK, AU, CA, EU) that:
-- Import or distribute health/wellness products
-- Sell on Amazon/eBay/Etsy (Japanese goods niche)
-- Are specialty food importers (Japanese food, matcha, sake)
-- Are beauty/cosmetics distributors interested in J-beauty
-- Are industrial tools importers/distributors
-- Operate Japanese-themed or Asia-focused retail stores
+---
+
+## Ideal Customer Profiles (ICP)
+
+Target ONE of these per run. Rotate daily.
+
+### ICP A — Amazon Japan-Niche Seller (US / AU first)
+- Amazon/DTC brand selling Japanese products, 1–15 employees, $300K–$3M revenue
+- Pain: high MOQ, slow suppliers, no English support from Japanese makers
+- Hook: "No MOQ first order. English communication throughout."
+- Find via: Amazon seller research (search "Japanese skincare / matcha / kitchen tools" → find third-party sellers)
+
+### ICP B — Regional Health/Natural Food Distributor (US / EU)
+- Regional distributor supplying health food stores, 10–50 employees, $2M–$20M revenue
+- Has or wants Japanese product lines (matcha, supplements, fermented foods)
+- Pain: Japanese suppliers have high MOQs and no English support
+- Hook: "Exclusive regional rights. We consolidate Japan shipments into one."
+- Find via: JETRO buyer lists, Expo West exhibitor lists, Europages
+
+### ICP C — Japanese Goods Specialty Importer (UK first, then US / AU)
+- Already imports/retails Japanese goods — knows Japan, wants new exclusive brands
+- Pain: limited supplier relationships, hard to find authentic small-batch brands
+- Hook: "We find brands you can't find on Alibaba — small artisan, regional, factory-direct."
+- Find via: ImportYeti (search Japan HS codes), Kompass directory
+
+---
+
+## Lead Sources (use in this priority order)
+
+### 1. ImportYeti.com (FREE — use first)
+US customs import data. Find companies already importing from Japan.
+
+**HS codes to search:**
+- `3304` — Beauty/skincare
+- `2106` — Food supplements / health
+- `8467` — Industrial handheld tools
+- `8205` — Hand tools (general)
+- `2101` — Green tea / matcha extracts
+- `2208` — Japanese spirits (sake, shochu)
+
+Go to importyeti.com → search by HS code + filter "country: Japan" → export company list.
+These are **verified buyers** — they already import from Japan.
+
+### 2. Amazon Seller Research
+- Search Amazon for: "Japanese skincare," "matcha powder," "Japanese kitchen tools," "Japanese hand tools"
+- Identify third-party sellers (not Amazon itself)
+- Visit their storefront/website → find contact email on /contact or /about page
+- Best targets: sellers with 50–500 reviews in a Japanese product category
+
+### 3. Trade Show Exhibitor Lists (free, public)
+- **Natural Products Expo West** (expowst.com) — health, beauty, food buyers
+- **Fancy Food Show** (specialtyfood.com) — specialty food importers
+- **NY NOW** (nynow.com) — gifts, crafts, lifestyle buyers
+- Filter exhibitors for Japanese product categories or check booth descriptions
+
+### 4. Web Search (fallback only — lower quality)
+Use Serper only if the above sources yield fewer than 8 targets.
+```
+"Japanese [category]" importer distributor [country] contact email
+site:importyeti.com japan [HS category]
+```
+
+### 5. Apollo.io (free tier: 50 exports/month)
+- Search: `"Japan import" AND (buyer OR sourcing)` + country filter
+- Title filters: Import Manager, Category Buyer, Sourcing Director, Founder
+- Company size: 10–200 employees
+
+---
 
 ## Workflow
 
-### Step 1 — Load Sent Log
-Read `logs/sent.json`. Extract list of already-contacted emails/domains.
+### Step 1 — Load Sent Log + Choose ICP
+```
+Read logs/sent.json → extract already-contacted domains
+Choose today's ICP (rotate A → B → C → A...)
+Choose lead source based on ICP (ImportYeti for ICP C, Amazon for ICP A, trade shows for ICP B)
+```
 
-### Step 2 — Research Target Companies
-Use web search (Serper) to find fresh targets. Rotate categories each run.
+### Step 2 — Find Target Companies
+Using the lead source appropriate for today's ICP:
+- Pull 15–20 candidate companies
+- For each: company name, website, country, category, what they sell/import
 
-**Search queries (rotate):**
-- `"Japanese health products" importer distributor USA contact`
-- `"Japanese beauty products" wholesale distributor UK Australia`
-- `"Japanese food" importer specialty grocer USA Canada`
-- `"Japanese tools" supplier distributor North America`
-- `Japanese goods Amazon seller wholesale supplier`
-- `matcha wholesale importer USA Europe`
-- `Japanese wellness products distributor B2B`
-
-Search for 15-20 companies. For each, collect:
-- Company name
-- Website URL
-- Country
-- Category (health/beauty/food/tools/general)
-- Brief description
+Skip if domain already in `logs/sent.json`.
 
 ### Step 3 — Find Contact Emails
-For each company website, crawl the `/contact`, `/about`, `/team` pages to find:
-- Direct personal email (e.g., john@company.com) ← PREFERRED
-- Generic contact email (e.g., info@, hello@, purchasing@) ← acceptable if no personal found
+For each company website, crawl `/contact`, `/about`, `/team`:
+- Direct personal email (firstname@company.com) ← PREFERRED
+- Generic (info@, purchasing@, hello@) ← acceptable fallback
 
-Skip companies where no email can be found after checking 2-3 pages.
-Skip companies already in `logs/sent.json` (by domain).
-
-Target: find **8 contactable companies** per run.
+Target: **8 contactable companies** per run.
 
 ### Step 4 — Generate Personalized Email
-For each company, write a short, punchy email. **Max 120 words.** No fluff.
 
-**Template guidance:**
-- Line 1: Reference something specific about their business (product niche, region, what they sell)
-- Line 2-3: MGC's offer — "We source [specific category] products directly from Japanese manufacturers and supply to overseas distributors."
-- Line 4: Concrete hook — "We're currently working with 3 new suppliers in [category] with no MOQ for first orders."
-- Line 5: CTA — One simple question to prompt a reply. E.g., "Would you be open to a quick call this week?"
-- Sign off: Jayden Barnes | VP of Growth | MGC inc. | jayden.barnes@mgc-global01.com
+**Hard rules:**
+- MAX 150 words. No exceptions.
+- ALWAYS mention something specific about their business (their products, their market)
+- ALWAYS include the "No MOQ first order" hook
+- ONE call-to-action only: "15-min call?" or "Want our product list?"
+- NO attachments, NO company history, NO "I hope this email finds you well"
 
-**Subject line formula:** `Japanese [category] sourcing — [Company Name]`
+**Subject line formulas (A/B test):**
+- `Japanese [specific product] supplier — already exporting to [their country]`
+- `Found your [Amazon store / website] — question about your Japan sourcing`
+- `[Company name] — [specific product] direct from Japan, no MOQ`
 
-**Tone:** Professional, direct, not salesy. Treat them as a peer.
+**Email template:**
+```
+Hi [First Name],
+
+Noticed [Company Name] sells [their specific product] — we source that
+category direct from manufacturers in [specific Japan region].
+
+MGC is a Japan-based trading company. We work with overseas buyers who want:
+- Factory-direct pricing (no middlemen)
+- No MOQ on first order — sample before committing
+- English support + we handle export/customs paperwork
+
+We currently supply [relevant category] to buyers in [their market].
+
+Would a 15-minute call make sense? Happy to share our current product list.
+
+Jayden Barnes
+VP of Growth | MGC inc. | jayden.barnes@mgc-global01.com
+```
+
+**Tone:** Peer-to-peer. Not salesy. Assume they're busy.
 
 ### Step 5 — Send via n8n Webhook
-POST to `https://mgc-pass-proxy.duckdns.org/n8n/webhook/overseas-buyer-email`
-
-Use `curl` or Python `requests`. Example:
 ```bash
 curl -s -X POST https://mgc-pass-proxy.duckdns.org/n8n/webhook/overseas-buyer-email \
   -H "Content-Type: application/json" \
-  -d '{
-    "to": "EMAIL",
-    "subject": "SUBJECT",
-    "body": "PLAIN TEXT",
-    "body_html": "<p>HTML</p>",
-    "company": "COMPANY NAME"
-  }'
+  -d '{"to":"EMAIL","subject":"SUBJECT","body":"PLAIN TEXT","body_html":"<p>HTML</p>","company":"COMPANY"}'
 ```
 
 ### Step 6 — Update Sent Log
-Append each sent email to `logs/sent.json`:
+Append to `logs/sent.json`:
 ```json
-[
-  {
-    "date": "2026-04-12",
-    "company": "Company Name",
-    "email": "contact@company.com",
-    "domain": "company.com",
-    "country": "USA",
-    "category": "health",
-    "subject": "Japanese health products sourcing — Company Name"
-  }
-]
+{
+  "date": "2026-04-12",
+  "company": "Company Name",
+  "email": "contact@company.com",
+  "domain": "company.com",
+  "country": "USA",
+  "category": "health",
+  "icp": "A",
+  "lead_source": "amazon_research",
+  "subject": "Japanese matcha supplier — already exporting to USA"
+}
 ```
 
 ### Step 7 — Report to Slack
-After all emails sent, post summary to Slack DM (U0AM9DC9SJW):
 ```
 📧 Outreach complete — [DATE]
+ICP: [A/B/C] | Source: [importyeti/amazon/tradeshows]
 Sent: X emails
-Companies: [list of company names]
+Companies: [list]
 Categories: health (2), beauty (3), food (1), tools (2)
 ```
 
-## Error Handling
-- If webhook returns non-200: log the error, skip that company, continue with the rest
-- If web crawl fails: skip that company, move to the next
-- If < 4 companies found with valid emails: send a Slack alert to Jayden, run again tomorrow
+---
 
-## Config File
+## Error Handling
+- Webhook non-200: log, skip, continue
+- Web crawl fails: skip, next company
+- < 4 companies found: Slack alert to Jayden, try different lead source tomorrow
+
+## Config
 `config/config.json`:
 ```json
 {
@@ -152,7 +218,9 @@ Categories: health (2), beauty (3), food (1), tools (2)
   "slack_dm": "U0AM9DC9SJW",
   "sender_email": "jayden.barnes@mgc-global01.com",
   "sender_name": "Jayden Barnes",
-  "categories_rotation": ["health", "beauty", "food", "tools", "general"],
+  "icp_rotation": ["A", "B", "C"],
+  "current_icp_index": 0,
+  "categories_rotation": ["health", "beauty", "food", "tools", "crafts"],
   "last_category_index": 0
 }
 ```
@@ -160,3 +228,8 @@ Categories: health (2), beauty (3), food (1), tools (2)
 ## Cron Schedule
 Runs daily at **09:00 JST** via mechatron cron.
 Label: `overseas-buyer-outreach`
+
+## Weekly Targets
+- 8 emails/day × 5 days = 40 emails/week
+- Expected reply rate (good targeting): 8–15%
+- Target: 3–6 warm replies per week

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mechatron.cron.hourly-status</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/jayden.csai/bin/mechatron</string>
+        <string>--task</string>
+        <string>general</string>
+        <string>--workspace</string>
+        <string>/Users/jayden.csai/clawd</string>
+        <string>--no-mcp</string>
+        <string>--fresh</string>
+        <string>Report status to Jayden: (1) Read memory/tasks.json and list active tasks + completion %, (2) summarize recent accomplishments from today's daily note in memory/ (the .md file matching today's date), (3) list any blockers or issues, (4) post to Slack DM U0AM9DC9SJW with emoji indicator (✅=good / ⚠️=issue / 🔴=critical). Format: ONE clear status message.</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Users/jayden.csai/claude-agent/logs/cron-hourly-status.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jayden.csai/claude-agent/logs/cron-hourly-status.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/jayden.csai/bin</string>
+        <key>HOME</key>
+        <string>/Users/jayden.csai</string>
+    </dict>
+</dict>
+</plist>

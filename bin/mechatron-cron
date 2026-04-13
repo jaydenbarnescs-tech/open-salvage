@@ -1,0 +1,243 @@
+#!/opt/homebrew/bin/node
+'use strict';
+// mechatron-cron — Manage mechatron scheduled jobs via macOS LaunchAgents
+// Usage:
+//   mechatron-cron list                                   — list all mechatron cron jobs
+//   mechatron-cron add <name> --schedule <cron> --task <type> [--workspace <path>] -- [mechatron args]
+//   mechatron-cron remove <name>                          — remove a job
+//   mechatron-cron run <name>                             — run a job immediately
+//   mechatron-cron status <name>                          — show job status
+
+const fs = require('fs');
+const path = require('path');
+const { execFileSync, execSync } = require('child_process');
+
+const HOME = process.env.HOME || '/Users/jayden.csai';
+const LAUNCH_AGENTS_DIR = path.join(HOME, 'Library/LaunchAgents');
+const MECHATRON_BIN = path.join(HOME, 'bin/mechatron');
+const STATE_DIR = path.join(HOME, '.mechatron/cron');
+const PREFIX = 'com.mechatron.cron';
+
+function log(msg) { console.log(`[mechatron-cron] ${msg}`); }
+
+// ── Parse cron expression to LaunchAgent StartCalendarInterval ──────────
+function cronToCalendarInterval(expr) {
+  // Supports: "0 4 * * *" (minute hour day month weekday)
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 5) throw new Error(`Invalid cron expression: ${expr}`);
+  const [minute, hour, day, month, weekday] = parts;
+
+  const interval = {};
+  if (minute !== '*') interval.Minute = parseInt(minute);
+  if (hour !== '*') interval.Hour = parseInt(hour);
+  if (day !== '*') interval.Day = parseInt(day);
+  if (month !== '*') interval.Month = parseInt(month);
+  if (weekday !== '*') interval.Weekday = parseInt(weekday);
+
+  return interval;
+}
+
+function intervalToPlistDict(interval) {
+  const lines = [];
+  for (const [key, val] of Object.entries(interval)) {
+    lines.push(`        <key>${key}</key>`);
+    lines.push(`        <integer>${val}</integer>`);
+  }
+  return lines.join('\n');
+}
+
+// ── State management ─────────────────────────────────────────────────────
+function loadState() {
+  const statePath = path.join(STATE_DIR, 'state.json');
+  try { return JSON.parse(fs.readFileSync(statePath, 'utf-8')); } catch { return { jobs: {} }; }
+}
+
+function saveState(state) {
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(STATE_DIR, 'state.json'), JSON.stringify(state, null, 2));
+}
+
+function updateJobRun(name, status, error) {
+  const state = loadState();
+  if (!state.jobs[name]) state.jobs[name] = {};
+  const job = state.jobs[name];
+  job.lastRunAt = new Date().toISOString();
+  job.lastRunStatus = status;
+  if (error) job.lastError = error;
+  job.runCount = (job.runCount || 0) + 1;
+  if (status === 'failed') job.consecutiveErrors = (job.consecutiveErrors || 0) + 1;
+  else job.consecutiveErrors = 0;
+  saveState(state);
+}
+
+// ── Commands ─────────────────────────────────────────────────────────────
+function cmdList() {
+  const state = loadState();
+  let plists;
+  try {
+    plists = fs.readdirSync(LAUNCH_AGENTS_DIR).filter(f => f.startsWith(PREFIX));
+  } catch { plists = []; }
+
+  if (plists.length === 0) {
+    log('No mechatron cron jobs found.');
+    return;
+  }
+
+  console.log('NAME                          LOADED   LAST RUN             STATUS');
+  for (const plist of plists) {
+    const name = plist.replace(`${PREFIX}.`, '').replace('.plist', '');
+    const label = `${PREFIX}.${name}`;
+
+    let loaded = 'no';
+    try {
+      const out = execSync(`launchctl list 2>/dev/null | grep "${label}"`, { encoding: 'utf-8' });
+      if (out.trim()) loaded = 'yes';
+    } catch { /* not loaded */ }
+
+    const jobState = state.jobs?.[name] || {};
+    const lastRun = jobState.lastRunAt ? jobState.lastRunAt.slice(0, 19) : 'never';
+    const status = jobState.lastRunStatus || '-';
+
+    console.log(`${name.padEnd(30)} ${loaded.padEnd(9)} ${lastRun.padEnd(21)} ${status}`);
+  }
+}
+
+function cmdAdd(name, args) {
+  let schedule = null;
+  let task = 'general';
+  let workspace = null;
+  const mechatronArgs = [];
+  let inPassthrough = false;
+
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--') { inPassthrough = true; continue; }
+    if (inPassthrough) { mechatronArgs.push(args[i]); continue; }
+    switch (args[i]) {
+      case '--schedule': schedule = args[++i]; break;
+      case '--task': task = args[++i]; break;
+      case '--workspace': workspace = args[++i]; break;
+      default: mechatronArgs.push(args[i]);
+    }
+  }
+
+  if (!schedule) { console.error('--schedule <cron-expr> required'); process.exit(1); }
+
+  const interval = cronToCalendarInterval(schedule);
+  const label = `${PREFIX}.${name}`;
+  const logPath = path.join(HOME, `claude-agent/logs/cron-${name}.log`);
+
+  // Build mechatron command
+  const cmdArgs = [MECHATRON_BIN, '--task', task];
+  if (workspace) cmdArgs.push('--workspace', workspace);
+  cmdArgs.push('--fresh', ...mechatronArgs);
+
+  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${label}</string>
+    <key>ProgramArguments</key>
+    <array>
+${cmdArgs.map(a => `        <string>${a}</string>`).join('\n')}
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+${intervalToPlistDict(interval)}
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>${logPath}</string>
+    <key>StandardErrorPath</key>
+    <string>${logPath}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${HOME}/bin</string>
+        <key>HOME</key>
+        <string>${HOME}</string>
+    </dict>
+</dict>
+</plist>`;
+
+  const plistPath = path.join(LAUNCH_AGENTS_DIR, `${label}.plist`);
+  fs.writeFileSync(plistPath, plist);
+
+  // Load it
+  try { execSync(`launchctl unload "${plistPath}" 2>/dev/null`); } catch {}
+  execSync(`launchctl load "${plistPath}"`);
+
+  // Track in state
+  const state = loadState();
+  state.jobs[name] = {
+    label,
+    schedule,
+    task,
+    workspace: workspace || 'default',
+    createdAt: new Date().toISOString(),
+    plistPath,
+    runCount: 0,
+  };
+  saveState(state);
+
+  log(`Created job: ${name} (${schedule}) → mechatron --task ${task}`);
+  log(`Plist: ${plistPath}`);
+  log(`Log: ${logPath}`);
+}
+
+function cmdRemove(name) {
+  const label = `${PREFIX}.${name}`;
+  const plistPath = path.join(LAUNCH_AGENTS_DIR, `${label}.plist`);
+
+  try { execSync(`launchctl unload "${plistPath}" 2>/dev/null`); } catch {}
+  try { fs.unlinkSync(plistPath); } catch {}
+
+  const state = loadState();
+  delete state.jobs[name];
+  saveState(state);
+
+  log(`Removed job: ${name}`);
+}
+
+function cmdRun(name) {
+  const state = loadState();
+  const job = state.jobs[name];
+  if (!job) { console.error(`Job not found: ${name}`); process.exit(1); }
+
+  log(`Running job: ${name}`);
+  try {
+    execSync(`launchctl start "${job.label}"`, { encoding: 'utf-8' });
+    updateJobRun(name, 'started');
+    log('Job triggered. Check logs for output.');
+  } catch (e) {
+    updateJobRun(name, 'failed', e.message);
+    console.error(`Failed: ${e.message}`);
+  }
+}
+
+function cmdStatus(name) {
+  const state = loadState();
+  const job = state.jobs[name];
+  if (!job) { console.error(`Job not found: ${name}`); process.exit(1); }
+
+  console.log(JSON.stringify(job, null, 2));
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────
+const [,, cmd, ...rest] = process.argv;
+
+switch (cmd) {
+  case 'list': cmdList(); break;
+  case 'add': cmdAdd(rest[0], rest.slice(1)); break;
+  case 'remove': cmdRemove(rest[0]); break;
+  case 'run': cmdRun(rest[0]); break;
+  case 'status': cmdStatus(rest[0]); break;
+  default:
+    console.log(`Usage:
+  mechatron-cron list
+  mechatron-cron add <name> --schedule "M H D Mo W" --task <type> [--workspace <path>] -- [extra args]
+  mechatron-cron remove <name>
+  mechatron-cron run <name>
+  mechatron-cron status <name>`);
+}

@@ -1,0 +1,103 @@
+#!/opt/homebrew/bin/node
+'use strict';
+// mechatron-backlog-recovery — One-time catch-up on missed Slack messages
+// Reads bridge.log for failed handler errors, cross-references with Slack history,
+// inserts unprocessed messages into the message outbox for Vanessa to catch up on.
+
+const { execFileSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const https = require('https');
+
+const HOME = process.env.HOME || '/Users/jayden.csai';
+const LOG_FILE = path.join(HOME, 'claude-agent/logs/bridge.log');
+const DB_CMD = path.join(HOME, 'bin/mechatron-db');
+const SLACK_TOKEN = process.env.SLACK_BOT_TOKEN || '';
+const DM_CHANNEL = 'D0AQW7VF4UA';
+
+function log(msg) { console.log(`[backlog] ${new Date().toISOString()} ${msg}`); }
+
+function dbExec(...args) {
+  try { return execFileSync(DB_CMD, args, { encoding: 'utf-8', timeout: 5000 }).trim(); }
+  catch { return null; }
+}
+
+// Find failed messages in bridge log from last 48 hours
+function findFailedMessages() {
+  const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+  const lines = fs.readFileSync(LOG_FILE, 'utf-8').split('\n').filter(l => l.trim());
+
+  const failed = [];
+  for (const line of lines) {
+    try {
+      const entry = JSON.parse(line);
+      if (entry.level === 'error' && entry.msg === 'handler error' && entry.ts > cutoff) {
+        failed.push({ ts: entry.ts, channel: entry.channel, error: entry.error?.slice(0, 100) });
+      }
+    } catch {}
+  }
+  return failed;
+}
+
+// Fetch recent Slack messages to find what wasn't answered
+function fetchSlackHistory(channel, limit = 20) {
+  return new Promise((resolve, reject) => {
+    const url = `https://slack.com/api/conversations.history?channel=${channel}&limit=${limit}`;
+    https.get(url, { headers: { 'Authorization': `Bearer ${SLACK_TOKEN}` } }, (res) => {
+      let data = '';
+      res.on('data', d => data += d);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          resolve(parsed.messages || []);
+        } catch (e) { reject(e); }
+      });
+    }).on('error', reject);
+  });
+}
+
+async function main() {
+  log('Starting backlog recovery...');
+
+  // Initialize DB if needed
+  dbExec('init');
+
+  // Get recent Slack messages
+  const messages = await fetchSlackHistory(DM_CHANNEL, 30);
+  const userMessages = messages.filter(m => !m.bot_id && !m.subtype && m.text);
+
+  // Get failed error timestamps from log
+  const failedErrors = findFailedMessages();
+  log(`Found ${failedErrors.length} errors and ${userMessages.length} user messages in last 48h`);
+
+  // Find user messages that likely weren't answered
+  // (messages from today that have errors nearby in time)
+  let inserted = 0;
+  for (const msg of userMessages) {
+    const msgTime = new Date(parseFloat(msg.ts) * 1000);
+    const now = new Date();
+    const hoursSince = (now - msgTime) / (1000 * 60 * 60);
+
+    // Only look at messages from last 24 hours
+    if (hoursSince > 24) continue;
+
+    // Check if there's a bot reply after this message
+    const msgIndex = messages.indexOf(msg);
+    const nextMsg = messages[msgIndex - 1]; // messages are reverse chronological
+    const hasReply = nextMsg && nextMsg.bot_id;
+
+    if (!hasReply) {
+      // This message likely wasn't answered
+      const id = dbExec('msg', 'save', msg.channel || DM_CHANNEL, msg.user, msg.text.slice(0, 500), msg.thread_ts || '');
+      if (id) {
+        log(`Queued: "${msg.text.slice(0, 60)}..." → ${id}`);
+        inserted++;
+      }
+    }
+  }
+
+  log(`Inserted ${inserted} messages into outbox for catch-up`);
+  log('Recovery complete. Restart slack bridge to process pending messages.');
+}
+
+main().catch(e => { log(`ERROR: ${e.message}`); process.exit(1); });

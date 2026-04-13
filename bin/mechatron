@@ -1,0 +1,1399 @@
+#!/opt/homebrew/bin/node
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { execFileSync, spawn } = require('child_process');
+
+// ── Constants ────────────────────────────────────────────────────────────
+const HOME = process.env.HOME || '/Users/jayden.csai';
+const DEFAULT_WORKSPACE = path.join(HOME, '.openclaw/workspace');
+const GLOBAL_SKILLS_DIR = path.join(HOME, '.mechatron/skills');
+const GLOBAL_CONFIG_PATH = path.join(HOME, '.mechatron/config.json');
+const GLOBAL_MCP_CONFIG = path.join(HOME, '.mechatron/mcp-config.json');
+// Auto-detect Claude binary — survives version updates
+const CLAUDE_BIN = (() => {
+  const candidates = [
+    '/opt/homebrew/bin/claude',
+    path.join(HOME, 'bin/claude'),
+  ];
+  // Also check for latest version directly
+  const codeDir = path.join(HOME, 'Library/Application Support/Claude/claude-code');
+  try {
+    const versions = fs.readdirSync(codeDir).sort().reverse();
+    for (const v of versions) {
+      candidates.push(path.join(codeDir, v, 'claude.app/Contents/MacOS/claude'));
+    }
+  } catch {}
+  for (const c of candidates) {
+    try { if (fs.existsSync(c) && !fs.lstatSync(c).isSymbolicLink() || fs.existsSync(fs.realpathSync(c))) return c; } catch {}
+  }
+  return '/opt/homebrew/bin/claude'; // fallback
+})();
+const VAULT = path.join(HOME, 'Library/Mobile Documents/iCloud~md~obsidian/Documents/MGC');
+const LOG_DIR = path.join(HOME, 'claude-agent/logs');
+const MEM0_PYTHON = path.join(HOME, 'claude-agent/mem0-env/bin/python');
+const MEM0_DIR    = path.join(HOME, 'claude-agent/mem0');
+
+// OpenClaw bootstrap allowlist
+const VALID_BOOTSTRAP_NAMES = new Set([
+  'AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md',
+  'HEARTBEAT.md', 'BOOTSTRAP.md', 'MEMORY.md', 'memory.md',
+  'COMPANY.md', 'TEAM.md', 'SLACK.md', 'NOTION.md', // workspace-specific extensions
+]);
+
+// OpenClaw loading order
+const BOOTSTRAP_LOAD_ORDER = [
+  'AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md',
+  'COMPANY.md', 'TEAM.md', 'SLACK.md', 'NOTION.md',
+  'HEARTBEAT.md', 'MEMORY.md',
+];
+
+// Minimal set for subagent/cron sessions (matches OpenClaw)
+const MINIMAL_BOOTSTRAP = new Set([
+  'AGENTS.md', 'TOOLS.md', 'SOUL.md', 'IDENTITY.md', 'USER.md',
+]);
+
+// Size limits (matches OpenClaw)
+const BOOTSTRAP_MAX_CHARS = 20000;       // 20KB per file
+const BOOTSTRAP_TOTAL_MAX_CHARS = 150000; // 150KB total
+const HEAD_RATIO = 0.7;
+const TAIL_RATIO = 0.2;
+
+// Session constants (matches OpenClaw)
+const DEFAULT_RESET_AT_HOUR = 4;  // 4am reset (OpenClaw default)
+const DEFAULT_RESET_TZ = 'Asia/Tokyo';  // JST for Jayden
+const DEFAULT_IDLE_MINUTES = 0;   // disabled by default
+
+// Context window budgeting (matches OpenClaw)
+const CHARS_PER_TOKEN = 3.5;          // OpenClaw's estimate (includes CJK)
+const SAFETY_MARGIN = 1.2;            // 20% buffer (matches OpenClaw)
+const MODEL_CONTEXT_TOKENS = {        // known context windows
+  'claude-opus-4': 1048576,           // 1M
+  'claude-sonnet-4-6': 1048576,       // 1M
+  'claude-sonnet-4-20250514': 1048576,
+  'claude-haiku-4-5': 200000,
+  'default': 200000,
+};
+const CONTEXT_WINDOW_HARD_MIN_TOKENS = 16000;  // hard block if below this
+const CONTEXT_WINDOW_WARN_BELOW_TOKENS = 32000; // warning if below this
+const SYSTEM_PROMPT_MAX_RATIO = 0.4;  // system prompt should use at most 40% of context
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+function log(msg) {
+  process.stderr.write(`[mechatron] ${new Date().toISOString()} ${msg}\n`);
+}
+
+function dateStr(offset = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() + offset);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function nowTimeStr() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function nowJST() {
+  return new Date().toLocaleString('en-US', { timeZone: 'Asia/Tokyo' });
+}
+
+function stripFrontmatter(content) {
+  return content.replace(/^---[\s\S]*?---\n*/, '').trim();
+}
+
+function parseFrontmatter(content) {
+  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  if (!match) return {};
+  const result = {};
+  for (const line of match[1].split('\n')) {
+    const sep = line.indexOf(':');
+    if (sep === -1) continue;
+    result[line.slice(0, sep).trim()] = line.slice(sep + 1).trim().replace(/^["']|["']$/g, '');
+  }
+  return result;
+}
+
+function escapeXml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function truncateContent(content, fileName, maxChars) {
+  if (content.length <= maxChars) return content;
+  const headSize = Math.floor(maxChars * HEAD_RATIO);
+  const tailSize = Math.floor(maxChars * TAIL_RATIO);
+  const head = content.slice(0, headSize);
+  const tail = content.slice(-tailSize);
+  log(`WARNING: ${fileName} truncated (${content.length} → ${maxChars} chars)`);
+  return `${head}\n\n[...truncated, read ${fileName} for full content...]\n\n${tail}`;
+}
+
+function readFileOrEmpty(filePath) {
+  try { return fs.readFileSync(filePath, 'utf-8'); } catch { return ''; }
+}
+
+// ── Session Management (OpenClaw pattern) ────────────────────────────────
+
+function getSessionStatePath(workspace) {
+  return path.join(workspace, 'sessions', 'state.json');
+}
+
+function loadSessionState(workspace) {
+  const statePath = getSessionStatePath(workspace);
+  try {
+    return JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+  } catch {
+    return { sessions: {}, resetPolicy: { mode: 'daily', atHour: DEFAULT_RESET_AT_HOUR, tz: DEFAULT_RESET_TZ, idleMinutes: DEFAULT_IDLE_MINUTES } };
+  }
+}
+
+function saveSessionState(workspace, state) {
+  const dir = path.join(workspace, 'sessions');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(getSessionStatePath(workspace), JSON.stringify(state, null, 2));
+}
+
+// Matches OpenClaw's resolveDailyResetAtMs logic
+function resolveDailyResetAtMs(nowMs, atHour, tz) {
+  // Get current time in the target timezone
+  const nowInTz = new Date(new Date(nowMs).toLocaleString('en-US', { timeZone: tz }));
+  const resetToday = new Date(nowInTz);
+  resetToday.setHours(atHour, 0, 0, 0);
+
+  // If current time is before today's reset hour, use yesterday's reset
+  if (nowInTz.getTime() < resetToday.getTime()) {
+    resetToday.setDate(resetToday.getDate() - 1);
+  }
+
+  return resetToday.getTime();
+}
+
+function evaluateSessionFreshness(sessionEntry, resetPolicy) {
+  const nowMs = Date.now();
+  const updatedAt = sessionEntry.updatedAt || 0;
+
+  // Daily reset check
+  if (resetPolicy.mode === 'daily') {
+    const resetAtMs = resolveDailyResetAtMs(nowMs, resetPolicy.atHour || DEFAULT_RESET_AT_HOUR, resetPolicy.tz || DEFAULT_RESET_TZ);
+    if (updatedAt < resetAtMs) {
+      return { fresh: false, reason: `daily reset (last active before ${new Date(resetAtMs).toISOString()})` };
+    }
+  }
+
+  // Idle timeout check
+  if (resetPolicy.idleMinutes && resetPolicy.idleMinutes > 0) {
+    const idleExpiresAt = updatedAt + (resetPolicy.idleMinutes * 60 * 1000);
+    if (nowMs > idleExpiresAt) {
+      return { fresh: false, reason: `idle timeout (${resetPolicy.idleMinutes}m)` };
+    }
+  }
+
+  return { fresh: true, reason: 'session is current' };
+}
+
+// Derive session key following OpenClaw's agent:agentId:rest pattern
+function deriveSessionKey(workspace, taskType, explicitKey) {
+  if (explicitKey) return explicitKey;
+
+  const agentId = path.basename(workspace).replace(/[^a-z0-9-]/gi, '-').toLowerCase();
+
+  switch (taskType) {
+    case 'linkedin':
+    case 'triage':
+    case 'organise':
+      // One-shot tasks — no session continuity
+      return null;
+    default:
+      return `mechatron:${agentId}:main`;
+  }
+}
+
+// Decide whether to continue an existing session or start fresh
+function resolveSessionAction(workspace, sessionKey, forceFreesh) {
+  if (!sessionKey || forceFreesh) {
+    return { action: 'fresh', reason: 'no session key or --fresh flag' };
+  }
+
+  const state = loadSessionState(workspace);
+  const entry = state.sessions[sessionKey];
+
+  if (!entry) {
+    return { action: 'new', reason: 'no existing session for this key' };
+  }
+
+  const freshness = evaluateSessionFreshness(entry, state.resetPolicy);
+  if (!freshness.fresh) {
+    log(`Session ${sessionKey} stale: ${freshness.reason}. Starting fresh.`);
+    return { action: 'new', reason: freshness.reason };
+  }
+
+  return { action: 'continue', reason: 'session is current', sessionName: entry.sessionName || sessionKey };
+}
+
+// Update session state after a call
+function updateSessionState(workspace, sessionKey, sessionAction) {
+  if (!sessionKey) return;
+
+  const state = loadSessionState(workspace);
+  const nowMs = Date.now();
+
+  if (!state.sessions[sessionKey]) {
+    state.sessions[sessionKey] = {
+      sessionKey,
+      sessionName: sessionKey,
+      createdAt: nowMs,
+      updatedAt: nowMs,
+      callCount: 0,
+      status: 'active',
+    };
+  }
+
+  const entry = state.sessions[sessionKey];
+  entry.updatedAt = nowMs;
+  entry.callCount = (entry.callCount || 0) + 1;
+  entry.lastTask = taskType;
+
+  // If we started fresh, reset the creation time
+  if (sessionAction === 'new') {
+    entry.createdAt = nowMs;
+    entry.callCount = 1;
+  }
+
+  saveSessionState(workspace, state);
+}
+
+// ── Error Formatter (OpenClaw pattern: formatAssistantErrorText) ─────────
+function formatUserFacingError(code, stderr, stdout) {
+  const err = ((stderr || '') + (stdout || '')).toLowerCase();
+
+  // Auth errors
+  if (err.includes('not logged in') || err.includes('please run /login') || err.includes('oauth') || err.includes('unauthorized'))
+    return { category: 'auth', message: 'Authentication expired. Mechatron will try to refresh. If this persists, run: /opt/homebrew/bin/claude auth login', canAutoFix: true };
+
+  // Rate limit
+  if (err.includes('rate limit') || err.includes('429') || err.includes('too many requests'))
+    return { category: 'rate_limit', message: 'API rate limit reached. Retrying in 30 seconds...', canAutoFix: true };
+
+  // Claude binary missing
+  if (err.includes('enoent') || err.includes('spawn') && err.includes('no such file'))
+    return { category: 'binary_missing', message: 'Claude CLI binary not found. Auto-detecting latest version...', canAutoFix: true };
+
+  // Context overflow
+  if (err.includes('context') && (err.includes('overflow') || err.includes('too large') || err.includes('exceeded')))
+    return { category: 'context_overflow', message: 'Conversation too long. Starting fresh session.', canAutoFix: true };
+
+  // Timeout
+  if (err.includes('timeout') || err.includes('timed out'))
+    return { category: 'timeout', message: 'Request timed out. Retrying with a simpler prompt...', canAutoFix: true };
+
+  // Overloaded
+  if (err.includes('overloaded') || err.includes('503') || err.includes('capacity'))
+    return { category: 'overloaded', message: 'AI service temporarily overloaded. Retrying in a moment...', canAutoFix: true };
+
+  // Max turns
+  if (err.includes('max turns') || err.includes('reached max'))
+    return { category: 'max_turns', message: 'Ran out of processing turns. Try a simpler request or start a new session.', canAutoFix: false };
+
+  // Network
+  if (err.includes('econnrefused')) return { category: 'network', message: 'Connection refused. A required service may be down.', canAutoFix: false };
+  if (err.includes('econnreset') || err.includes('epipe')) return { category: 'network', message: 'Network connection interrupted. Retrying...', canAutoFix: true };
+  if (err.includes('enotfound') || err.includes('dns')) return { category: 'network', message: 'DNS lookup failed. Check internet connection.', canAutoFix: false };
+
+  // Billing
+  if (err.includes('billing') || err.includes('credits') || err.includes('insufficient balance'))
+    return { category: 'billing', message: 'API billing issue. Check your subscription status.', canAutoFix: false };
+
+  // Unknown — sanitize and truncate
+  const sanitized = (stderr || stdout || 'Unknown error').slice(0, 200).replace(/\n/g, ' ').trim();
+  return { category: 'unknown', message: `Unexpected error: ${sanitized}`, canAutoFix: false };
+}
+
+// ── Preflight Validation (OpenClaw Tier 0) ───────────────────────────────
+function runPreflightChecks() {
+  const issues = [];
+
+  // Check Claude binary exists
+  try {
+    if (!fs.existsSync(CLAUDE_BIN)) {
+      // Try to fix: find latest version
+      const codeDir = path.join(HOME, 'Library/Application Support/Claude/claude-code');
+      try {
+        const versions = fs.readdirSync(codeDir).sort().reverse();
+        for (const v of versions) {
+          const candidate = path.join(codeDir, v, 'claude.app/Contents/MacOS/claude');
+          if (fs.existsSync(candidate)) {
+            // Fix the symlinks
+            try { fs.unlinkSync('/opt/homebrew/bin/claude'); } catch {}
+            try { fs.unlinkSync(path.join(HOME, 'bin/claude')); } catch {}
+            fs.symlinkSync(candidate, path.join(HOME, 'bin/claude'));
+            try { fs.symlinkSync(candidate, '/opt/homebrew/bin/claude'); } catch {}
+            log(`PREFLIGHT: Fixed Claude binary symlink → ${v}`);
+            break;
+          }
+        }
+      } catch { issues.push('Claude CLI binary not found and could not auto-fix'); }
+    }
+  } catch { issues.push('Could not verify Claude binary'); }
+
+  // Check OAuth token exists
+  const tokenFile = path.join(HOME, '.claude-setup-token');
+  try {
+    if (!fs.existsSync(tokenFile)) {
+      issues.push('OAuth token file missing (~/.claude-setup-token)');
+    } else {
+      const token = fs.readFileSync(tokenFile, 'utf-8').trim();
+      if (!token || token.length < 20) issues.push('OAuth token appears invalid');
+    }
+  } catch { issues.push('Could not read OAuth token'); }
+
+  // Check workspace exists and has required files
+  if (!fs.existsSync(WORKSPACE)) {
+    issues.push(`Workspace not found: ${WORKSPACE}`);
+  } else {
+    const required = ['SOUL.md', 'IDENTITY.md'];
+    for (const f of required) {
+      if (!fs.existsSync(path.join(WORKSPACE, f))) {
+        issues.push(`Required workspace file missing: ${f}`);
+      }
+    }
+  }
+
+  return issues;
+}
+
+// ── Context Window Budgeting ─────────────────────────────────────────────
+
+function estimateTokens(text) {
+  return Math.ceil((text || '').length / CHARS_PER_TOKEN);
+}
+
+function resolveModelContextWindow(passThroughArgs) {
+  // Extract model from pass-through args
+  let model = 'default';
+  for (let i = 0; i < passThroughArgs.length; i++) {
+    if (passThroughArgs[i] === '--model') {
+      model = passThroughArgs[i + 1] || 'default';
+      break;
+    }
+  }
+
+  // Normalize model aliases
+  const normalized = model.toLowerCase();
+  if (normalized.includes('opus')) return MODEL_CONTEXT_TOKENS['claude-opus-4'];
+  if (normalized.includes('sonnet')) return MODEL_CONTEXT_TOKENS['claude-sonnet-4-6'];
+  if (normalized.includes('haiku')) return MODEL_CONTEXT_TOKENS['claude-haiku-4-5'];
+
+  return MODEL_CONTEXT_TOKENS[model] || MODEL_CONTEXT_TOKENS['default'];
+}
+
+function evaluateContextBudget(systemPromptText, passThroughArgs) {
+  const promptTokens = estimateTokens(systemPromptText);
+  const contextWindow = resolveModelContextWindow(passThroughArgs);
+  const maxPromptTokens = Math.floor(contextWindow * SYSTEM_PROMPT_MAX_RATIO);
+  const remainingForHistory = contextWindow - Math.ceil(promptTokens * SAFETY_MARGIN);
+
+  const result = {
+    promptTokens,
+    promptChars: systemPromptText.length,
+    contextWindow,
+    maxPromptTokens,
+    remainingForHistory,
+    status: 'ok',
+    warnings: [],
+  };
+
+  // Check if system prompt exceeds safe ratio
+  if (promptTokens > maxPromptTokens) {
+    result.status = 'warning';
+    result.warnings.push(
+      `System prompt (${promptTokens} tokens) exceeds ${Math.round(SYSTEM_PROMPT_MAX_RATIO * 100)}% ` +
+      `of context window (${maxPromptTokens} tokens). Consider reducing bootstrap files or skills.`
+    );
+  }
+
+  // Check remaining space for conversation
+  if (remainingForHistory < CONTEXT_WINDOW_HARD_MIN_TOKENS) {
+    result.status = 'critical';
+    result.warnings.push(
+      `CRITICAL: Only ${remainingForHistory} tokens remaining for conversation ` +
+      `(minimum: ${CONTEXT_WINDOW_HARD_MIN_TOKENS}). Claude may fail to respond.`
+    );
+  } else if (remainingForHistory < CONTEXT_WINDOW_WARN_BELOW_TOKENS) {
+    result.status = result.status === 'ok' ? 'warning' : result.status;
+    result.warnings.push(
+      `Low headroom: ${remainingForHistory} tokens remaining for conversation ` +
+      `(recommended minimum: ${CONTEXT_WINDOW_WARN_BELOW_TOKENS}).`
+    );
+  }
+
+  return result;
+}
+
+// ── Hooks System (OpenClaw pattern) ──────────────────────────────────────
+
+function discoverHooks(workspace, eventName) {
+  const hooksDir = path.join(workspace, 'hooks');
+  if (!fs.existsSync(hooksDir)) return [];
+
+  const hooks = [];
+  let entries;
+  try { entries = fs.readdirSync(hooksDir); } catch { return []; }
+
+  for (const entry of entries) {
+    const hookDir = path.join(hooksDir, entry);
+    const stat = fs.statSync(hookDir);
+
+    if (stat.isDirectory()) {
+      // OpenClaw pattern: directory with HOOK.md + handler.js
+      const hookMd = path.join(hookDir, 'HOOK.md');
+      const handlerJs = path.join(hookDir, 'handler.js');
+      if (!fs.existsSync(handlerJs)) continue;
+
+      const meta = fs.existsSync(hookMd) ? parseFrontmatter(readFileOrEmpty(hookMd)) : {};
+      const events = (meta.events || eventName).split(',').map(s => s.trim());
+
+      if (events.includes(eventName) || events.includes('*')) {
+        hooks.push({ name: entry, handler: handlerJs, type: 'module', meta });
+      }
+    } else if (entry.startsWith(`${eventName}.`) && (entry.endsWith('.sh') || entry.endsWith('.js'))) {
+      // Simple pattern: before-call.sh, after-call.js
+      hooks.push({ name: entry, handler: hookDir, type: entry.endsWith('.sh') ? 'shell' : 'module', meta: {} });
+    }
+  }
+
+  return hooks.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function executeHooks(workspace, eventName, context) {
+  const hooks = discoverHooks(workspace, eventName);
+  if (hooks.length === 0) return;
+
+  for (const hook of hooks) {
+    try {
+      log(`Hook: ${eventName} → ${hook.name}`);
+
+      if (hook.type === 'shell') {
+        execFileSync('bash', [hook.handler], {
+          encoding: 'utf-8',
+          timeout: 10000,
+          env: {
+            ...process.env,
+            MECHATRON_WORKSPACE: workspace,
+            MECHATRON_TASK: context.taskType || '',
+            MECHATRON_SESSION_KEY: context.sessionKey || '',
+            MECHATRON_PROMPT_TOKENS: String(context.promptTokens || 0),
+            MECHATRON_EXIT_CODE: String(context.exitCode || 0),
+          },
+        });
+      } else if (hook.type === 'module') {
+        const mod = require(hook.handler);
+        if (typeof mod === 'function') {
+          await mod(context);
+        } else if (typeof mod.default === 'function') {
+          await mod.default(context);
+        } else if (typeof mod[eventName.replace(/-/g, '')] === 'function') {
+          await mod[eventName.replace(/-/g, '')](context);
+        }
+      }
+    } catch (e) {
+      log(`WARNING: Hook ${hook.name} failed: ${e.message}`);
+    }
+  }
+}
+
+// ── Plugin System ────────────────────────────────────────────────────────
+// Plugins are directories in {workspace}/plugins/ or ~/.mechatron/plugins/
+// Each plugin directory contains a manifest.json:
+//   { name, description, provides: ["context"|"hook"|"tool"], entry: "index.js" }
+
+function discoverPlugins(workspace) {
+  const pluginDirs = [
+    path.join(workspace, 'plugins'),
+    path.join(HOME, '.mechatron/plugins'),
+  ];
+
+  const plugins = [];
+  const seen = new Set();
+
+  for (const dir of pluginDirs) {
+    if (!fs.existsSync(dir)) continue;
+    let entries;
+    try { entries = fs.readdirSync(dir); } catch { continue; }
+
+    for (const entry of entries) {
+      const pluginDir = path.join(dir, entry);
+      if (!fs.statSync(pluginDir).isDirectory()) continue;
+
+      const manifestPath = path.join(pluginDir, 'manifest.json');
+      if (!fs.existsSync(manifestPath)) continue;
+
+      try {
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+        const name = manifest.name || entry;
+
+        // Workspace plugins override global (same as skills)
+        if (seen.has(name)) continue;
+        seen.add(name);
+
+        plugins.push({
+          name,
+          description: manifest.description || '',
+          provides: manifest.provides || [],
+          entry: manifest.entry || 'index.js',
+          dir: pluginDir,
+          manifest,
+        });
+      } catch (e) {
+        log(`WARNING: Plugin ${entry} manifest error: ${e.message}`);
+      }
+    }
+  }
+
+  return plugins;
+}
+
+function loadPluginContextSections(plugins) {
+  const contextSections = [];
+  for (const plugin of plugins) {
+    if (!plugin.provides.includes('context')) continue;
+    try {
+      const mod = require(path.join(plugin.dir, plugin.entry));
+      if (typeof mod.getContext === 'function') {
+        const ctx = mod.getContext({ workspace: WORKSPACE, taskType, config });
+        if (ctx) contextSections.push(`# Plugin: ${plugin.name}\n\n${ctx}`);
+      }
+    } catch (e) {
+      log(`WARNING: Plugin ${plugin.name} context error: ${e.message}`);
+    }
+  }
+  return contextSections;
+}
+
+// ── Mem0 memory cache (5-min TTL) ────────────────────────────────────────
+let memoryCache     = null;
+let memoryCacheTime = 0;
+const MEMORY_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+function getCachedMemory() {
+  if (memoryCache && (Date.now() - memoryCacheTime) < MEMORY_CACHE_TTL) {
+    return memoryCache;
+  }
+  try {
+    const raw = execFileSync(
+      MEM0_PYTHON,
+      [path.join(MEM0_DIR, 'all.py')],
+      {
+        timeout: 30_000,
+        encoding: 'utf-8',
+        env: { ...process.env, HOME, PATH: `${HOME}/bin:/opt/homebrew/opt/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` },
+      }
+    ).trim();
+    if (raw && raw.includes('# Vanessa Core Memory')) {
+      memoryCache     = raw;
+      memoryCacheTime = Date.now();
+      return raw;
+    }
+  } catch (e) {
+    // Non-fatal — log will be available once log() is defined
+  }
+  return null;
+}
+
+function getMemoryContext(query) {
+  const allMemory = getCachedMemory();
+  if (!allMemory) return null;
+
+  // If there's a meaningful query, run search.py for relevance-ranked top results
+  if (query && query.trim().length >= 10) {
+    try {
+      const searchOut = execFileSync(
+        MEM0_PYTHON,
+        [path.join(MEM0_DIR, 'search.py'), query.trim().slice(0, 500), '3'],
+        {
+          timeout: 15_000,
+          encoding: 'utf-8',
+          env: { ...process.env, HOME, PATH: `${HOME}/bin:/opt/homebrew/opt/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin` },
+        }
+      ).trim();
+      const hits = JSON.parse(searchOut);
+      if (Array.isArray(hits) && hits.length > 0) {
+        const relevant = hits.map(h => `- ${h.memory}`).join('\n');
+        return `## Most Relevant\n\n${relevant}\n\n---\n\n${allMemory}`;
+      }
+    } catch { /* search is best-effort, fall through to full context */ }
+  }
+
+  return allMemory;
+}
+
+// ── Parse args ───────────────────────────────────────────────────────────
+const args = process.argv.slice(2);
+let taskType = 'general';
+let workspacePath = null;
+let profileName = null;
+let sessionKey = null;
+let noMemory = false;
+let noLiveState = false;
+let noMcp = false;
+let minimal = false;
+let fresh = false;
+let dryRun = false;
+let taskId = null;  // Links execution to a SQLite task
+const passThroughArgs = [];
+
+for (let i = 0; i < args.length; i++) {
+  switch (args[i]) {
+    case '--task':
+      taskType = args[++i] || 'general';
+      break;
+    case '--workspace':
+      workspacePath = args[++i];
+      break;
+    case '--profile':
+      profileName = args[++i];
+      break;
+    case '--session-key':
+      sessionKey = args[++i];
+      break;
+    case '--no-memory':
+      noMemory = true;
+      break;
+    case '--no-live-state':
+      noLiveState = true;
+      break;
+    case '--no-mcp':
+      noMcp = true;
+      break;
+    case '--minimal':
+      minimal = true;
+      break;
+    case '--fresh':
+      fresh = true;
+      break;
+    case '--dry-run':
+      dryRun = true;
+      break;
+    case '--task-id':
+      taskId = args[++i];
+      break;
+    default:
+      passThroughArgs.push(args[i]);
+  }
+}
+
+// ── Resolve workspace ────────────────────────────────────────────────────
+let WORKSPACE;
+if (workspacePath) {
+  WORKSPACE = path.resolve(workspacePath);
+} else if (profileName) {
+  WORKSPACE = path.join(HOME, `.openclaw/workspace-${profileName}`);
+} else {
+  WORKSPACE = DEFAULT_WORKSPACE;
+}
+
+if (!fs.existsSync(WORKSPACE)) {
+  log(`FATAL: Workspace not found: ${WORKSPACE}`);
+  process.exit(1);
+}
+
+// ── Load config ──────────────────────────────────────────────────────────
+// Workspace config takes priority over global
+const wsConfigPath = path.join(WORKSPACE, 'mechatron.json');
+let config;
+try {
+  config = JSON.parse(fs.readFileSync(
+    fs.existsSync(wsConfigPath) ? wsConfigPath : GLOBAL_CONFIG_PATH, 'utf-8'
+  ));
+} catch (e) {
+  log(`WARNING: No config found: ${e.message}. Using defaults.`);
+  config = {
+    skills: { alwaysInject: [] },
+    rateLimit: { retryWaitSeconds: 30, maxRetries: 1 },
+  };
+}
+
+// ── 1. Load bootstrap files (OpenClaw order, with size limits) ───────────
+const sections = [];
+let totalChars = 0;
+
+const allowedFiles = minimal ? MINIMAL_BOOTSTRAP : VALID_BOOTSTRAP_NAMES;
+
+for (const fileName of BOOTSTRAP_LOAD_ORDER) {
+  if (!allowedFiles.has(fileName)) continue;
+
+  // Skip MEMORY.md if noMemory or minimal
+  if ((fileName === 'MEMORY.md' || fileName === 'memory.md') && (noMemory || minimal)) continue;
+
+  const filePath = path.join(WORKSPACE, fileName);
+  const raw = readFileOrEmpty(filePath);
+  if (!raw.trim()) continue;
+
+  let content = stripFrontmatter(raw);
+  if (!content) continue;
+
+  // Enforce per-file limit
+  if (content.length > BOOTSTRAP_MAX_CHARS) {
+    content = truncateContent(content, fileName, BOOTSTRAP_MAX_CHARS);
+  }
+
+  // Enforce total limit
+  if (totalChars + content.length > BOOTSTRAP_TOTAL_MAX_CHARS) {
+    const remaining = BOOTSTRAP_TOTAL_MAX_CHARS - totalChars;
+    if (remaining < 64) {
+      log(`WARNING: Total bootstrap limit reached. Skipping ${fileName}`);
+      continue;
+    }
+    content = truncateContent(content, fileName, remaining);
+  }
+
+  sections.push(content);
+  totalChars += content.length;
+}
+
+// ── 2. Load skills as XML listing (on-demand, OpenClaw style) ────────────
+const skillDirs = [];
+
+// Workspace skills first (higher priority)
+const wsSkillsDir = path.join(WORKSPACE, 'skills');
+if (fs.existsSync(wsSkillsDir)) skillDirs.push(wsSkillsDir);
+
+// Global/bundled skills as fallback
+if (fs.existsSync(GLOBAL_SKILLS_DIR)) skillDirs.push(GLOBAL_SKILLS_DIR);
+
+const skillEntries = [];   // {name, description, location} for XML listing
+const alwaysInject = new Set(config.skills?.alwaysInject || []);
+const alwaysInjectedContent = [];
+
+const seenSkills = new Set();
+
+for (const dir of skillDirs) {
+  let files;
+  try { files = fs.readdirSync(dir); } catch { continue; }
+
+  for (const file of files) {
+    const filePath = path.join(dir, file);
+    const stat = fs.statSync(filePath);
+
+    let skillFile;
+    if (stat.isDirectory()) {
+      // Skill as directory with SKILL.md inside
+      skillFile = path.join(filePath, 'SKILL.md');
+      if (!fs.existsSync(skillFile)) continue;
+    } else if (file.endsWith('.md')) {
+      skillFile = filePath;
+    } else {
+      continue;
+    }
+
+    const raw = readFileOrEmpty(skillFile);
+    if (!raw.trim()) continue;
+
+    const fm = parseFrontmatter(raw);
+    const skillName = fm.name || path.basename(file, '.md');
+
+    // Deduplicate (workspace skills override global)
+    if (seenSkills.has(skillName)) continue;
+    seenSkills.add(skillName);
+
+    const description = fm.description || '';
+
+    // Always-inject skills get full content in prompt
+    if (alwaysInject.has(skillName)) {
+      const content = stripFrontmatter(raw);
+      if (content) {
+        alwaysInjectedContent.push(`# Skill: ${skillName}\n\n${content}`);
+      }
+    } else {
+      // All other skills: compact XML listing only
+      const compactPath = skillFile.replace(HOME, '~');
+      skillEntries.push({ name: skillName, description, location: compactPath });
+    }
+  }
+}
+
+// Add always-injected skills to sections
+for (const content of alwaysInjectedContent) {
+  sections.push(content);
+}
+
+// Add XML skill listing
+if (skillEntries.length > 0) {
+  const xmlLines = [
+    'The following skills provide specialized instructions for specific tasks.',
+    "Use the read tool to load a skill's file when the task matches its description.",
+    "When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
+    '',
+    '<available_skills>',
+  ];
+  for (const skill of skillEntries) {
+    xmlLines.push('  <skill>');
+    xmlLines.push(`    <name>${escapeXml(skill.name)}</name>`);
+    xmlLines.push(`    <description>${escapeXml(skill.description)}</description>`);
+    xmlLines.push(`    <location>${escapeXml(skill.location)}</location>`);
+    xmlLines.push('  </skill>');
+  }
+  xmlLines.push('</available_skills>');
+  sections.push(xmlLines.join('\n'));
+}
+
+// ── 2b. Load plugin context ──────────────────────────────────────────────
+const plugins = discoverPlugins(WORKSPACE);
+const pluginContextSections = loadPluginContextSections(plugins);
+for (const section of pluginContextSections) {
+  sections.push(section);
+}
+
+// ── CACHE BOUNDARY ──────────────────────────────────────────────────────
+// Everything above this point is stable across turns (bootstrap + skills + plugins).
+// Everything below changes per-turn (memory, live state, time).
+// This boundary helps Anthropic's prompt caching.
+sections.push('<!-- CACHE_BOUNDARY: stable sections above, dynamic sections below -->');
+
+// Session recovery context is injected after session resolution (see below)
+
+// ── 3. Memory file hints (on-demand, not auto-injected) ──────────────────
+if (!noMemory && !minimal) {
+  const memoryDir = path.join(WORKSPACE, 'memory');
+  const today = dateStr(0);
+  const yesterday = dateStr(-1);
+  const hints = [];
+
+  const todayFile = path.join(memoryDir, `${today}.md`);
+  const yesterdayFile = path.join(memoryDir, `${yesterday}.md`);
+
+  if (fs.existsSync(todayFile)) {
+    hints.push(`- ${todayFile.replace(HOME, '~')} (today)`);
+  }
+  if (fs.existsSync(yesterdayFile)) {
+    hints.push(`- ${yesterdayFile.replace(HOME, '~')} (yesterday)`);
+  }
+
+  const memoryLines = [];
+  if (hints.length > 0) {
+    memoryLines.push(`Daily notes available (use read tool if needed):`);
+    memoryLines.push(...hints);
+  }
+  memoryLines.push('');
+  memoryLines.push(`To search across all memory files, run: mechatron-memory-search "${WORKSPACE}" "<query>"`);
+  memoryLines.push('This searches MEMORY.md and all daily notes. Returns matching lines with context.');
+  sections.push(`# Memory\n\n${memoryLines.join('\n')}`);
+}
+
+// ── 3b. CLI tools auto-discovery + External tool access ─────────────────
+
+// Auto-discover from tools.json registry
+const TOOLS_REGISTRY = path.join(HOME, '.mechatron/tools.json');
+const cliToolLines = [];
+
+try {
+  const registry = JSON.parse(fs.readFileSync(TOOLS_REGISTRY, 'utf-8'));
+  for (const tool of (registry.tools || [])) {
+    cliToolLines.push(`- **${tool.name}**: ${tool.description}`);
+    if (tool.examples && tool.examples.length > 0) {
+      cliToolLines.push(`  Usage: \`${tool.examples[0]}\``);
+    }
+  }
+} catch {}
+
+// Auto-discover scripts in ~/bin/ not already in registry
+try {
+  const registeredNames = new Set();
+  try {
+    const reg = JSON.parse(fs.readFileSync(TOOLS_REGISTRY, 'utf-8'));
+    (reg.tools || []).forEach(t => registeredNames.add(t.name));
+  } catch {}
+
+  const binFiles = fs.readdirSync(path.join(HOME, 'bin'));
+  for (const f of binFiles) {
+    if (registeredNames.has(f)) continue;
+    const fp = path.join(HOME, 'bin', f);
+    try {
+      const stat = fs.statSync(fp);
+      if (!stat.isFile()) continue;
+      // Skip non-scripts (images, etc.)
+      if (f.match(/\.(jpg|png|gif|ico)$/)) continue;
+      // Try to read first useful comment line
+      const head = fs.readFileSync(fp, 'utf-8').slice(0, 500);
+      const descMatch = head.match(/^#[^!]\s*(.+)/m) || head.match(/^\/\/\s*(.+)/m);
+      if (descMatch) {
+        cliToolLines.push(`- **${f}**: ${descMatch[1].trim()}`);
+      }
+    } catch {}
+  }
+} catch {}
+
+if (cliToolLines.length > 0) {
+  sections.push(`# Local CLI Tools\n\nAvailable commands on this Mac (run via bash):\n${cliToolLines.join('\n')}`);
+}
+
+// External MCP tool access
+sections.push(`# External Tools
+
+When you need to use external services (Notion, n8n, Slack API, server management, GitHub, image generation, etc.), use this command:
+
+\`\`\`
+mechatron-tools "${WORKSPACE}" "<describe what you need done>"
+\`\`\`
+
+This spawns a sub-agent with full MCP tool access. Examples:
+- \`mechatron-tools "${WORKSPACE}" "Read the Notion page for RENPHO project"\`
+- \`mechatron-tools "${WORKSPACE}" "List active n8n workflows"\`
+- \`mechatron-tools "${WORKSPACE}" "Search Google for latest AI agent frameworks"\`
+- \`mechatron-tools "${WORKSPACE}" "Post to Slack channel C09DR06AY3V: meeting at 3pm"\`
+
+The sub-agent has access to: Notion, n8n, GitHub, ElevenLabs, LINE, Apify, Serper web search, Oracle VM server management, Supabase, Google Slides/Docs, Instagram, Unsplash, Slack, Vercel, and Gemini image generation.
+
+Use this when you need data from external services. For simple conversation, do NOT use this — just respond directly.
+
+## Sub-Agent Spawning (for complex multi-step tasks)
+
+When you need to divide a large task into parallel or sequential sub-tasks, use:
+
+\`\`\`
+mechatron-spawn "${WORKSPACE}" '{"tasks":[{"id":"t1","instruction":"Do X"},{"id":"t2","instruction":"Do Y"}]}'
+\`\`\`
+
+Or for a single focused sub-task:
+\`\`\`
+mechatron-spawn "${WORKSPACE}" "Do this specific thing"
+\`\`\`
+
+Add \`--parallel\` flag to run tasks simultaneously (max 3 concurrent).
+
+Returns structured JSON with status and output for each task. Use this for:
+- Research tasks that can be parallelized
+- Multi-step workflows where each step is independent
+- Any task that would exceed your turn limit if done alone
+
+Safeguards: max 3 tasks per call, 60s timeout per task, sub-agents cannot spawn further sub-agents.`);
+
+// ── 4. Live state ────────────────────────────────────────────────────────
+if (!noLiveState) {
+  const liveStateParts = [];
+
+  try {
+    const launchctlOutput = execFileSync('bash', ['-c', 'launchctl list 2>/dev/null | grep -E "(mgc|claude|openclaw)" || true'], {
+      encoding: 'utf-8', timeout: 5000
+    }).trim();
+    if (launchctlOutput) {
+      liveStateParts.push(`## Active LaunchAgents\n\`\`\`\n${launchctlOutput}\n\`\`\``);
+    }
+  } catch (e) {
+    log(`WARNING: Could not read LaunchAgents: ${e.message}`);
+  }
+
+  try {
+    const vaultFiles = fs.readdirSync(VAULT).filter(f => f.match(/^voice-.*\.md$/));
+    liveStateParts.push(`## Vault Status\nRaw voice notes waiting: ${vaultFiles.length}`);
+  } catch { /* vault may not exist for this workspace */ }
+
+  const linkedinLog = path.join(LOG_DIR, 'linkedin.log');
+  try {
+    const logContent = execFileSync('tail', ['-15', linkedinLog], {
+      encoding: 'utf-8', timeout: 3000
+    }).trim();
+    if (logContent) {
+      liveStateParts.push(`## Recent LinkedIn Log\n\`\`\`\n${logContent}\n\`\`\``);
+    }
+  } catch { /* no log, skip */ }
+
+  if (liveStateParts.length > 0) {
+    sections.push(`# Live System State\n\n${liveStateParts.join('\n\n')}`);
+  }
+}
+
+// ── 5. Turn efficiency instruction ───────────────────────────────────────
+sections.push(`# Important: Turn Efficiency
+All workspace files (SOUL.md, USER.md, TOOLS.md, IDENTITY.md, COMPANY.md, TEAM.md, SLACK.md, NOTION.md, AGENTS.md, HEARTBEAT.md, MEMORY.md) are already loaded above. Do NOT read them again via the read tool — that wastes turns. Only use the read tool for files NOT already in this prompt (skills, memory daily notes, external files).`);
+
+// ── 5b. Date/time ────────────────────────────────────────────────────────
+sections.push(`# Current Time\n\n${nowJST()} (JST)`);
+
+// ── 6. Assemble system prompt ────────────────────────────────────────────
+const systemPrompt = sections.join('\n\n---\n\n');
+
+// ── 7. Resolve session ──────────────────────────────────────────────────
+const resolvedSessionKey = deriveSessionKey(WORKSPACE, taskType, sessionKey);
+const sessionDecision = resolveSessionAction(WORKSPACE, resolvedSessionKey, fresh);
+
+// ── 7a. Session recovery context ─────────────────────────────────────────
+const sessionSummaryPath = path.join(WORKSPACE, 'sessions', '.last-session-summary.md');
+if (sessionDecision.action !== 'continue') {
+  const summary = readFileOrEmpty(sessionSummaryPath).trim();
+  if (summary) {
+    sections.push(`# Recent Context (auto-recovered)\n\n${summary}`);
+    log('Session recovery: injected recent context summary');
+  }
+}
+
+// ── 7b. Mem0 memory injection (non-continue sessions only) ───────────────
+if (sessionDecision.action !== 'continue' && !noMemory && !minimal) {
+  let incomingMsg = '';
+  for (let i = 0; i < passThroughArgs.length; i++) {
+    if (passThroughArgs[i] === '-p' || passThroughArgs[i] === '--prompt') {
+      incomingMsg = passThroughArgs[i + 1] || '';
+      break;
+    }
+  }
+  try {
+    const memCtx = getMemoryContext(incomingMsg);
+    if (memCtx) {
+      sections.unshift(`# Vanessa Memory\n\n${memCtx}`);
+      log('mem0: injected memory context into system prompt');
+    } else {
+      log('mem0: no memories found, skipping injection');
+    }
+  } catch (e) {
+    log(`mem0: injection failed (non-fatal): ${e.message?.slice(0, 100) || e}`);
+  }
+}
+
+// Reassemble system prompt with recovery context (may have new sections)
+const systemPromptWithRecovery = sections.join('\n\n---\n\n');
+
+// ── 7b. Context budget evaluation ───────────────────────────────────────
+const budget = evaluateContextBudget(systemPromptWithRecovery, passThroughArgs);
+
+// Log warnings
+for (const warn of budget.warnings) {
+  log(`BUDGET ${budget.status.toUpperCase()}: ${warn}`);
+}
+
+// Hard block if critical
+if (budget.status === 'critical' && !dryRun) {
+  log('FATAL: System prompt too large for context window. Use --minimal or reduce workspace files.');
+  process.exit(1);
+}
+
+// ── Dry run ──────────────────────────────────────────────────────────────
+if (dryRun) {
+  process.stdout.write(systemPromptWithRecovery);
+  process.stdout.write(`\n\n--- MECHATRON v2 DRY RUN ---\n`);
+  process.stdout.write(`Workspace: ${WORKSPACE}\n`);
+  process.stdout.write(`Task: ${taskType}\n`);
+  process.stdout.write(`Session key: ${resolvedSessionKey || '(none)'}\n`);
+  process.stdout.write(`Session action: ${sessionDecision.action} (${sessionDecision.reason})\n`);
+  process.stdout.write(`Memory: ${noMemory ? 'off' : 'on'}\n`);
+  process.stdout.write(`Minimal: ${minimal ? 'yes' : 'no'}\n`);
+  process.stdout.write(`Live state: ${noLiveState ? 'off' : 'on'}\n`);
+  process.stdout.write(`Skills injected: ${alwaysInjectedContent.length}\n`);
+  process.stdout.write(`Skills listed (on-demand): ${skillEntries.length}\n`);
+  process.stdout.write(`Plugins loaded: ${plugins.length}${plugins.length ? ' (' + plugins.map(p => p.name).join(', ') + ')' : ''}\n`);
+  const wsMcp = path.join(WORKSPACE, 'mcp-config.json');
+  const mcpPath = fs.existsSync(wsMcp) ? wsMcp : GLOBAL_MCP_CONFIG;
+  if (!noMcp && !minimal && fs.existsSync(mcpPath)) {
+    try {
+      const mcpData = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
+      const servers = Object.keys(mcpData.mcpServers || {});
+      process.stdout.write(`MCP servers: ${servers.length} (${servers.join(', ')})\n`);
+    } catch { process.stdout.write(`MCP servers: error reading config\n`); }
+  } else {
+    process.stdout.write(`MCP servers: ${noMcp ? 'disabled' : 'none'}\n`);
+  }
+  process.stdout.write(`Bootstrap files: ${totalChars} chars\n`);
+  process.stdout.write(`System prompt: ${systemPromptWithRecovery.length} chars (~${budget.promptTokens} tokens)\n`);
+  process.stdout.write(`Context window: ${budget.contextWindow} tokens\n`);
+  process.stdout.write(`Remaining for history: ${budget.remainingForHistory} tokens\n`);
+  process.stdout.write(`Budget status: ${budget.status}${budget.warnings.length ? ' — ' + budget.warnings[0] : ''}\n`);
+  process.stdout.write(`Pass-through args: ${passThroughArgs.join(' ')}\n`);
+  process.exit(0);
+}
+
+// ── 7. Write system prompt to temp file ──────────────────────────────────
+const tmpFile = path.join(os.tmpdir(), `mechatron-${Date.now()}.txt`);
+fs.writeFileSync(tmpFile, systemPromptWithRecovery, 'utf-8');
+
+function cleanup() {
+  try { fs.unlinkSync(tmpFile); } catch {}
+}
+
+// ── 8. Build Claude CLI args ─────────────────────────────────────────────
+function buildClaudeArgs() {
+  const claudeArgs = ['--system-prompt-file', tmpFile];
+
+  // Session management based on freshness evaluation
+  switch (sessionDecision.action) {
+    case 'continue':
+      // Session is current — resume it
+      claudeArgs.push('--name', resolvedSessionKey);
+      claudeArgs.push('--continue');
+      log(`Session: continuing ${resolvedSessionKey}`);
+      break;
+    case 'new':
+      // Session is stale or new — start fresh with name
+      claudeArgs.push('--name', resolvedSessionKey);
+      log(`Session: new ${resolvedSessionKey} (${sessionDecision.reason})`);
+      break;
+    case 'fresh':
+      // No session tracking (one-shot tasks)
+      log(`Session: one-shot (${sessionDecision.reason})`);
+      break;
+  }
+
+  // MCP config — connect to proxy and local MCP servers
+  if (!noMcp) {
+    // Check for workspace-level MCP config first, then global
+    const wsMcpConfig = path.join(WORKSPACE, 'mcp-config.json');
+    const mcpConfigPath = fs.existsSync(wsMcpConfig) ? wsMcpConfig : GLOBAL_MCP_CONFIG;
+    if (fs.existsSync(mcpConfigPath)) {
+      claudeArgs.push('--mcp-config', mcpConfigPath);
+      log(`MCP: loaded ${path.basename(mcpConfigPath)} from ${path.dirname(mcpConfigPath)}`);
+    }
+  }
+
+  // Pass through all other args
+  claudeArgs.push(...passThroughArgs);
+
+  return claudeArgs;
+}
+
+// ── 9. Build environment with OAuth token ────────────────────────────────
+function buildEnv() {
+  const env = {
+    ...process.env,
+    PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:' + path.join(HOME, 'bin'),
+  };
+  const tokenFile = path.join(HOME, '.claude-setup-token');
+  try {
+    if (fs.existsSync(tokenFile)) {
+      env.CLAUDE_CODE_OAUTH_TOKEN = fs.readFileSync(tokenFile, 'utf-8').trim();
+    }
+  } catch {}
+  return env;
+}
+
+// ── 10. Call Claude ──────────────────────────────────────────────────────
+let activeClaudeChild = null; // tracked for SIGTERM propagation
+
+function callClaude(attempt = 1) {
+  return new Promise((resolve, reject) => {
+    const claudeArgs = buildClaudeArgs();
+
+    log(`Calling claude (attempt ${attempt}, task=${taskType}, workspace=${path.basename(WORKSPACE)}, session=${sessionKey || 'none'}, prompt=${systemPromptWithRecovery.length} chars)`);
+
+    const child = spawn(CLAUDE_BIN, claudeArgs, {
+      stdio: ['inherit', 'pipe', 'pipe'],
+      env: buildEnv(),
+      cwd: WORKSPACE,
+    });
+
+    activeClaudeChild = child;
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', d => {
+      const chunk = d.toString();
+      stdout += chunk;
+      process.stdout.write(chunk);
+    });
+    child.stderr.on('data', d => {
+      const chunk = d.toString();
+      stderr += chunk;
+      process.stderr.write(chunk);
+    });
+
+    child.on('close', code => {
+      activeClaudeChild = null;
+      resolve({ code, stdout, stderr });
+    });
+    child.on('error', err => {
+      activeClaudeChild = null;
+      reject(err);
+    });
+  });
+}
+
+function isRateLimited(stderr) {
+  const lower = (stderr || '').toLowerCase();
+  return lower.includes('rate limit') || lower.includes('429') || lower.includes('too many requests');
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+async function appendDailyNote(userPrompt) {
+  const today = dateStr(0);
+  const memDir = path.join(WORKSPACE, 'memory');
+  fs.mkdirSync(memDir, { recursive: true });
+  const noteFile = path.join(memDir, `${today}.md`);
+  const time = nowTimeStr();
+  const summary = (userPrompt || '').slice(0, 100).replace(/\n/g, ' ');
+
+  let existing = '';
+  try { existing = fs.readFileSync(noteFile, 'utf-8'); } catch {}
+  if (!existing) existing = `# ${today}\n\n`;
+
+  const entry = `- [${time}] task=${taskType} — ${summary}\n`;
+  fs.writeFileSync(noteFile, existing + entry);
+}
+
+// ── Main (with Preflight + Failover Cascade) ────────────────────────────
+async function main() {
+  // Propagate SIGTERM to active claude child so it doesn't orphan when
+  // mechatron-tools (or any parent) kills this process on timeout.
+  process.on('SIGTERM', () => {
+    if (activeClaudeChild && !activeClaudeChild.killed) {
+      activeClaudeChild.kill('SIGTERM');
+      setTimeout(() => { try { activeClaudeChild.kill('SIGKILL'); } catch {} }, 3000);
+    }
+    process.exit(1);
+  });
+
+  try {
+    // ── Tier 0: Preflight Validation ─────────────────────────────────
+    const preflightIssues = runPreflightChecks();
+    if (preflightIssues.length > 0) {
+      for (const issue of preflightIssues) log(`PREFLIGHT: ${issue}`);
+      // Re-check after auto-fix attempts
+      const remaining = runPreflightChecks();
+      if (remaining.length > 0) {
+        log(`PREFLIGHT FAILED: ${remaining.join('; ')}`);
+        process.stdout.write(`Preflight check failed: ${remaining.join('; ')}\n`);
+        cleanup();
+        process.exit(1);
+      }
+      log('PREFLIGHT: Issues auto-fixed');
+    }
+
+    // ── Task lifecycle: mark as running ─────────────────────────────
+    const DB_CMD = path.join(HOME, 'bin/mechatron-db');
+    let heartbeatInterval = null;
+    if (taskId) {
+      try {
+        execFileSync(DB_CMD, ['task', 'update', taskId, 'running'], { encoding: 'utf-8', timeout: 3000 });
+        execFileSync(DB_CMD, ['task', 'heartbeat', taskId], { encoding: 'utf-8', timeout: 3000 });
+        // Heartbeat: extend visibility timeout every 5 min while running
+        heartbeatInterval = setInterval(() => {
+          try { execFileSync(DB_CMD, ['task', 'heartbeat', taskId], { encoding: 'utf-8', timeout: 3000 }); }
+          catch { log('WARNING: Task heartbeat failed'); }
+        }, 300000); // 5 minutes
+        log(`Task ${taskId}: marked running with heartbeat`);
+      } catch (e) { log(`WARNING: Could not update task: ${e.message}`); }
+    }
+
+    // Extract user prompt for logging
+    let userPrompt = '';
+    for (let i = 0; i < passThroughArgs.length; i++) {
+      if (passThroughArgs[i] === '-p' || passThroughArgs[i] === '--prompt') {
+        userPrompt = passThroughArgs[i + 1] || '';
+        break;
+      }
+    }
+
+    // Execute before-call hooks
+    await executeHooks(WORKSPACE, 'before-call', {
+      workspace: WORKSPACE,
+      taskType,
+      sessionKey: resolvedSessionKey,
+      promptTokens: budget.promptTokens,
+      userPrompt,
+    });
+
+    // ── Tier 1-3: Failover Cascade ───────────────────────────────────
+    // Attempt 1: Normal call
+    let result = await callClaude(1);
+
+    if (result.code !== 0) {
+      const error = formatUserFacingError(result.code, result.stderr, result.stdout);
+      log(`FAILOVER: Attempt 1 failed — ${error.category}: ${error.message}`);
+
+      if (error.canAutoFix) {
+        // ── Tier 1: Auto-retry with backoff ──────────────────────
+        if (error.category === 'rate_limit' || error.category === 'overloaded' || error.category === 'network') {
+          const backoff = [5000, 15000, 60000]; // 5s, 15s, 60s (OpenClaw pattern)
+          for (let i = 0; i < backoff.length; i++) {
+            log(`FAILOVER: Retry ${i + 2} after ${backoff[i] / 1000}s...`);
+            await sleep(backoff[i]);
+            result = await callClaude(i + 2);
+            if (result.code === 0) break;
+            const retryErr = formatUserFacingError(result.code, result.stderr, result.stdout);
+            if (!retryErr.canAutoFix) break; // non-recoverable, stop retrying
+          }
+        }
+
+        // ── Tier 2: Context overflow → fresh session ─────────────
+        if (result.code !== 0 && error.category === 'context_overflow') {
+          log('FAILOVER: Context overflow — starting fresh session');
+          // Remove --continue from args if present
+          const freshArgs = passThroughArgs.filter(a => a !== '--continue');
+          // Re-build with fresh session
+          const origAction = sessionDecision.action;
+          sessionDecision.action = 'new';
+          result = await callClaude(99);
+          sessionDecision.action = origAction;
+        }
+
+        // ── Tier 2b: Auth error → re-read token ─────────────────
+        if (result.code !== 0 && error.category === 'auth') {
+          log('FAILOVER: Auth error — re-reading token');
+          // Token file may have been refreshed by linkedin-refresh agent
+          await sleep(2000);
+          result = await callClaude(98);
+        }
+
+        // ── Tier 2c: Timeout → retry with --minimal ─────────────
+        if (result.code !== 0 && error.category === 'timeout') {
+          log('FAILOVER: Timeout — retrying with minimal prompt');
+          minimal = true;
+          // Rebuild a smaller prompt (skip most context)
+          result = await callClaude(97);
+        }
+      }
+
+      // ── Tier 3: Surface clean error ────────────────────────────
+      if (result.code !== 0) {
+        const finalError = formatUserFacingError(result.code, result.stderr, result.stdout);
+        log(`FAILOVER EXHAUSTED: ${finalError.category} — ${finalError.message}`);
+        // Output the clean error message (not raw stderr)
+        if (!result.stdout.trim()) {
+          process.stdout.write(finalError.message + '\n');
+        }
+      }
+    }
+
+    // Update session state
+    try { updateSessionState(WORKSPACE, resolvedSessionKey, sessionDecision.action); } catch (e) {
+      log(`WARNING: Could not update session state: ${e.message}`);
+    }
+
+    // ── Task lifecycle: mark completion ─────────────────────────────
+    if (heartbeatInterval) clearInterval(heartbeatInterval);
+    if (taskId) {
+      try {
+        const taskStatus = (result.code === 0) ? 'done' : 'failed';
+        const taskResult = (result.code === 0) ? result.stdout.slice(0, 1000) : '';
+        const taskError = (result.code !== 0) ? (result.stderr || result.stdout).slice(0, 500) : '';
+        execFileSync(DB_CMD, ['task', 'update', taskId, taskStatus, taskResult, taskError], { encoding: 'utf-8', timeout: 3000 });
+        log(`Task ${taskId}: marked ${taskStatus}`);
+      } catch (e) { log(`WARNING: Could not complete task: ${e.message}`); }
+    }
+
+    // Execute after-call hooks
+    await executeHooks(WORKSPACE, 'after-call', {
+      workspace: WORKSPACE,
+      taskType,
+      sessionKey: resolvedSessionKey,
+      promptTokens: budget.promptTokens,
+      exitCode: result.code || 0,
+      stdout: result.stdout,
+      userPrompt,
+    });
+
+    // Append to daily note
+    try { await appendDailyNote(userPrompt); } catch (e) {
+      log(`WARNING: Could not append daily note: ${e.message}`);
+    }
+
+    cleanup();
+    process.exit(result.code || 0);
+  } catch (e) {
+    log(`FATAL: ${e.message}`);
+    cleanup();
+    process.exit(1);
+  }
+}
+
+main();

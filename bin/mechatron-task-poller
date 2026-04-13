@@ -1,0 +1,111 @@
+#!/bin/bash
+# mechatron-task-poller — Checks for pending/stalled tasks and processes them
+# Runs every 60 seconds via LaunchAgent (heartbeat fallback).
+# Also wakes immediately when ~/.mechatron/dispatch-signal is touched.
+#
+# Responsibilities:
+#   1. Recover and re-queue stalled background tasks (SwarmClaw supervisor recovery)
+#   2. Dispatch pending background tasks (OpenClaw runMissedJobs)
+#   3. Recover dead-PID mcp_slots and promote queued MCP tool calls (two-tier dispatch)
+
+set -euo pipefail
+
+HOME="${HOME:-/Users/jayden.csai}"
+DB_CMD="$HOME/bin/mechatron-db"
+MECHATRON_TOOLS="$HOME/bin/mechatron-tools"
+LOG="$HOME/claude-agent/logs/task-poller.log"
+SIGNAL_FILE="$HOME/.mechatron/dispatch-signal"
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG"; }
+
+# ── 1. Recover stalled background tasks (expired visibility timeout) ──────
+RECOVERED=$("$DB_CMD" recover 2>/dev/null || echo "")
+if [ -n "$RECOVERED" ]; then
+  log "RECOVERED: $RECOVERED"
+fi
+
+# ── 2. Check for pending background tasks ─────────────────────────────────
+PENDING=$("$DB_CMD" task list pending 2>/dev/null || echo "[]")
+TASK_COUNT=$(echo "$PENDING" | /opt/homebrew/bin/node -e "try{const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'));console.log(d.length)}catch{console.log(0)}" 2>/dev/null)
+
+if [ "${TASK_COUNT:-0}" != "0" ] && [ -n "$TASK_COUNT" ]; then
+  log "Found $TASK_COUNT pending tasks"
+
+  # Process up to 2 tasks per poll cycle (prevent overload)
+  echo "$PENDING" | /opt/homebrew/bin/node -e "
+const tasks = JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'));
+tasks.slice(0, 2).forEach(t => console.log(JSON.stringify(t)));
+" 2>/dev/null | while IFS= read -r TASK_JSON; do
+    TASK_ID=$(echo "$TASK_JSON" | /opt/homebrew/bin/node -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8')).id)" 2>/dev/null)
+    TASK_TYPE=$(echo "$TASK_JSON" | /opt/homebrew/bin/node -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8')).type)" 2>/dev/null)
+    TASK_PAYLOAD=$(echo "$TASK_JSON" | /opt/homebrew/bin/node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'));console.log(d.payload_preview||'{}')" 2>/dev/null)
+
+    if [ -z "$TASK_ID" ]; then continue; fi
+
+    log "Processing task $TASK_ID (type=$TASK_TYPE)"
+
+    WORKSPACE="$HOME/clawd"
+
+    PROMPT=$(echo "$TASK_PAYLOAD" | /opt/homebrew/bin/node -e "try{const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'));console.log(d.description||d.instruction||d.prompt||JSON.stringify(d))}catch(e){console.log('Process this task')}" 2>/dev/null)
+
+    "$HOME/bin/mechatron" \
+      --workspace "$WORKSPACE" \
+      --task "$TASK_TYPE" \
+      --task-id "$TASK_ID" \
+      --fresh \
+      --no-mcp \
+      -p "$PROMPT" \
+      --model claude-sonnet-4-6 \
+      --max-turns 15 \
+      --output-format text \
+      --dangerously-skip-permissions \
+      >> "$LOG" 2>&1 || log "Task $TASK_ID failed (exit $?)"
+
+    log "Task $TASK_ID processing complete"
+  done
+fi
+
+# ── 3. Dispatch queued MCP tool calls (two-tier dispatch) ─────────────────
+# Recover running slots whose process has died (SIGKILL bypass, crash, etc.)
+"$DB_CMD" mcp-recover >> "$LOG" 2>&1 || true
+
+# Promote up to MAX_DISPATCH_PER_CYCLE queued slots to running and execute them.
+# mcp-next is atomic: returns the slot only if capacity is available (< 5 running).
+MAX_DISPATCH_PER_CYCLE=2
+DISPATCHED=0
+
+while [ "$DISPATCHED" -lt "$MAX_DISPATCH_PER_CYCLE" ]; do
+  # mcp-next: recover dead PIDs + atomically promote oldest queued → running
+  NEXT=$("$DB_CMD" mcp-next $$ 2>/dev/null || true)
+
+  # Empty output = no queued slots or capacity full
+  [ -z "$NEXT" ] && break
+
+  # Parse: running|<id>|<instruction>|<workspace>
+  SLOT_ID=$(echo "$NEXT" | cut -d'|' -f2)
+  SLOT_INSTR=$(echo "$NEXT" | cut -d'|' -f3)
+  SLOT_WS=$(echo "$NEXT" | cut -d'|' -f4)
+
+  if [ -z "$SLOT_ID" ] || [ -z "$SLOT_INSTR" ]; then
+    log "mcp-dispatch: malformed next slot: $NEXT"
+    break
+  fi
+
+  log "mcp-dispatch: running slot $SLOT_ID — ${SLOT_INSTR:0:80}"
+
+  # Launch mechatron-tools with the pre-claimed slot (skips mcp-claim, uses this slot ID).
+  # Run in background so we can dispatch multiple slots per cycle without blocking.
+  MECHATRON_FROM_POLLER=1 MECHATRON_SLOT_ID="$SLOT_ID" \
+    "$MECHATRON_TOOLS" "${SLOT_WS:-$HOME/clawd}" "$SLOT_INSTR" \
+    >> "$LOG" 2>&1 &
+
+  DISPATCHED=$((DISPATCHED + 1))
+done
+
+if [ "$DISPATCHED" -gt 0 ]; then
+  log "mcp-dispatch: launched $DISPATCHED queued tool call(s)"
+fi
+
+# Clear the dispatch signal — we've processed whatever was queued.
+# Next touch will re-trigger immediately.
+rm -f "$SIGNAL_FILE" 2>/dev/null || true

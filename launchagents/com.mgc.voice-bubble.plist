@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mgc.voice-bubble</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>PYTHONPATH=/Users/jayden.csai/Library/Python/3.9/lib/python/site-packages /usr/bin/python3 /Users/jayden.csai/bin/voice-bubble.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>/Users/jayden.csai/Library/Python/3.9/lib/python/site-packages</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/jayden.csai/claude-agent/logs/voice-bubble.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jayden.csai/claude-agent/logs/voice-bubble.log</string>
+</dict>
+</plist>
