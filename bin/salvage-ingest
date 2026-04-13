@@ -1,7 +1,7 @@
 #!/opt/homebrew/bin/node
 'use strict';
-// mechatron-ingest — Pull knowledge from all sources into workspace memory for RAG indexing
-// Usage: mechatron-ingest <workspace> [--source slack|notion|sessions|all] [--reindex]
+// salvage-ingest — Pull knowledge from all sources into workspace memory for RAG indexing
+// Usage: salvage-ingest <workspace> [--source slack|notion|sessions|all] [--reindex]
 //
 // Sources:
 //   slack     — Fetch recent Slack DM and channel history, save as memory/*.md
@@ -17,7 +17,7 @@ const http = require('http');
 
 const HOME = process.env.HOME || '/Users/jayden.csai';
 const WORKSPACE = process.argv[2];
-if (!WORKSPACE) { console.error('Usage: mechatron-ingest <workspace> [--source slack|notion|sessions|all] [--reindex]'); process.exit(1); }
+if (!WORKSPACE) { console.error('Usage: salvage-ingest <workspace> [--source slack|notion|sessions|all] [--reindex]'); process.exit(1); }
 
 let source = 'all';
 let reindex = false;
@@ -150,8 +150,8 @@ async function ingestNotion() {
 
   for (const page of pageIds) {
     try {
-      // Use mechatron-tools to read Notion page
-      const result = execFileSync(path.join(HOME, 'bin/mechatron-tools'), [
+      // Use salvage-tools to read Notion page
+      const result = execFileSync(path.join(HOME, 'bin/salvage-tools'), [
         WORKSPACE,
         `Read the Notion page with id "${page.id}". Return the full text content only, no formatting or explanation.`
       ], { encoding: 'utf-8', timeout: 120000 });
@@ -236,7 +236,7 @@ async function main() {
 
   if (source === 'all' || source === 'slack') await ingestSlack();
   if (source === 'all' || source === 'sessions') ingestSessions();
-  // Notion last — it's slowest (uses mechatron-tools for each page)
+  // Notion last — it's slowest (uses salvage-tools for each page)
   if (source === 'all' || source === 'notion') {
     log('Skipping Notion for now (slow — use --source notion separately)');
   }
@@ -246,7 +246,7 @@ async function main() {
   if (reindex || source === 'all') {
     log('Reindexing memory with embeddings...');
     try {
-      execFileSync(path.join(HOME, 'bin/mechatron-memory-index'), [WORKSPACE], {
+      execFileSync(path.join(HOME, 'bin/salvage-memory-index'), [WORKSPACE], {
         encoding: 'utf-8', timeout: 120000, stdio: ['ignore', 'inherit', 'inherit']
       });
     } catch (e) {

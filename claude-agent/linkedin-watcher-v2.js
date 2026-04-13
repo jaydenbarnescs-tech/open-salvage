@@ -12,7 +12,7 @@ const QUEUE     = VAULT + '/2-queue/';
 const PROCESSED = VAULT + '/1-processed/';
 const HISTORY   = VAULT + '/history/';
 const CLAUDE    = process.env.HOME + '/bin/claude';
-const MECHATRON = process.env.HOME + '/bin/mechatron';
+const SALVAGE = process.env.HOME + '/bin/salvage';
 const LOG_DIR   = process.env.HOME + '/claude-agent/logs';
 const LOG_FILE  = LOG_DIR + '/linkedin.log';
 
@@ -182,10 +182,10 @@ function runClaude(prompt, options = {}) {
     const maxTurns = options.maxTurns || '1';
     const model = options.model || 'claude-sonnet-4-6';
     const args = ['--task', 'linkedin', '--fresh', '-p', prompt, '--model', model, '--max-turns', maxTurns, '--dangerously-skip-permissions'];
-    // OAuth token injection handled by mechatron internally
+    // OAuth token injection handled by salvage internally
     const env = { ...process.env, PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/jayden.csai/bin' };
 
-    const child = spawn(MECHATRON, args, {
+    const child = spawn(SALVAGE, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env
     });

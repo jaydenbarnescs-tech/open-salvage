@@ -1,6 +1,6 @@
 #!/opt/homebrew/bin/node
 'use strict';
-// mechatron-backlog-recovery — One-time catch-up on missed Slack messages
+// salvage-backlog-recovery — One-time catch-up on missed Slack messages
 // Reads bridge.log for failed handler errors, cross-references with Slack history,
 // inserts unprocessed messages into the message outbox for Vanessa to catch up on.
 
@@ -11,7 +11,7 @@ const https = require('https');
 
 const HOME = process.env.HOME || '/Users/jayden.csai';
 const LOG_FILE = path.join(HOME, 'claude-agent/logs/bridge.log');
-const DB_CMD = path.join(HOME, 'bin/mechatron-db');
+const DB_CMD = path.join(HOME, 'bin/salvage-db');
 const SLACK_TOKEN = process.env.SLACK_BOT_TOKEN || '';
 const DM_CHANNEL = 'D0AQW7VF4UA';
 

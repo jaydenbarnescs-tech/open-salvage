@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.mgc.mechatron-memory</string>
+    <string>com.mgc.salvage-memory</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/jayden.csai/claude-agent/mechatron-memory.sh</string>
+        <string>/Users/jayden.csai/claude-agent/salvage-memory.sh</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
@@ -19,9 +19,9 @@
     <key>RunAtLoad</key>
     <false/>
     <key>StandardOutPath</key>
-    <string>/Users/jayden.csai/claude-agent/logs/mechatron-memory.log</string>
+    <string>/Users/jayden.csai/claude-agent/logs/salvage-memory.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/jayden.csai/claude-agent/logs/mechatron-memory.log</string>
+    <string>/Users/jayden.csai/claude-agent/logs/salvage-memory.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>

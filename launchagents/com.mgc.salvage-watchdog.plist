@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.mgc.mechatron-watchdog</string>
+    <string>com.mgc.salvage-watchdog</string>
     <key>ProgramArguments</key>
     <array>
         <string>/opt/homebrew/bin/node</string>
-        <string>/Users/jayden.csai/bin/mechatron-watchdog</string>
+        <string>/Users/jayden.csai/bin/salvage-watchdog</string>
     </array>
     <key>StartInterval</key>
     <integer>300</integer>

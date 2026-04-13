@@ -1,0 +1,72 @@
+{
+  "tasks": [
+    {
+      "id": "github-koko-setup",
+      "title": "松尾さん用GitHubリポジトリ作成",
+      "status": "completed",
+      "priority": "high",
+      "description": "MGC AIワークスペースのGitHubリポジトリを作成し、松尾さん（koko1056-inv）にアクセス権を付与する。完了。",
+      "repo_url": "https://github.com/jaydenbarnescs-tech/mgc-ai-workspace",
+      "created": "2026-04-11",
+      "completed": "2026-04-12T02:25:00+09:00",
+      "notes": "repo: mgc-ai-workspace, private, koko1056-inv (push access) added"
+    },
+    {
+      "id": "komatsu-poc-close",
+      "title": "Komatsu Voice AI PoC — 締切超過・要即対応",
+      "status": "urgent",
+      "priority": "critical",
+      "description": "締切4/10を過ぎている。残タスク: Azure AI Search実装 + テストケース追加 + メトリクスレポート作成 → SORABITOに提出。松尾さん担当のElevenLabs改善は完了済み。komatsu-deploy.vercel.app にデプロイ済み。",
+      "created": "2026-04-12"
+    },
+    {
+      "id": "hikari-bug-fix",
+      "title": "Hikari/Sofia ISPボット — 文中断バグ修正",
+      "status": "todo",
+      "priority": "high",
+      "description": "mgc-pass-proxy.duckdns.org/hikari/ にデプロイ済み。文の途中で止まるバグあり（原因不明）。Komatsuパターンで再構築する方針。修正後はISP/通信会社向けに販売可能。",
+      "created": "2026-04-12"
+    },
+    {
+      "id": "japan-outreach-pipeline",
+      "title": "Japan SME アウトリーチ — 毎日自動実行セットアップ",
+      "status": "completed",
+      "priority": "high",
+      "description": "japan-sme-scout + japan-outreach スキルを使った自動アウトリーチパイプライン。Path B運用開始。",
+      "created": "2026-04-12",
+      "completed": "2026-04-12T02:30:00+09:00",
+      "cron_jobs": [
+        "path-b-sme-scout (Mon 6am) — 50社/週スカウト",
+        "path-b-outreach-9am/12pm/3pm (Mon-Fri) — 各5社自動送信",
+        "path-b-reply-check (daily 8am) — 返信検知・Slack通知",
+        "path-b-followup (Thu 9am) — 7日後フォローアップ"
+      ],
+      "notes": "6 cron jobs installed. Target: 50 companies/week across 5 categories (traditional crafts, food, industrial, electronics, home). Auto-outreach: ¥€£ overseas expansion support angle. Daily limit: 15 emails/day (3 batches × 5)."
+    },
+    {
+      "id": "voice-ai-package",
+      "title": "Voice AI プロダクト化 — 販売パッケージ作成",
+      "status": "todo",
+      "priority": "high",
+      "description": "Komatsu PoC完了後、音声AIを汎用パッケージとして販売できる形に整える。¥50K初期設定 + ¥20K/月のモデル。松岡建機の3案件が最初のターゲット。",
+      "created": "2026-04-12"
+    },
+    {
+      "id": "matsuoka-kenki-kickoff",
+      "title": "松岡建機 — 技術提案書作成",
+      "status": "todo",
+      "priority": "medium",
+      "description": "3案件のスコープドック（3/29作成済み）はある。GitHubリポジトリなし、開発ゼロ。まず初回フィードバックドックと技術提案書を作る。Komatsu完了後に着手。",
+      "created": "2026-04-12"
+    },
+    {
+      "id": "linkedin-daily-scout",
+      "title": "LinkedIn Web Scout — 日次cron設定",
+      "status": "todo",
+      "priority": "medium",
+      "description": "linkedin-web-scout cronが設定済みだが一度も実行されていない。日次スカウトを有効化する。",
+      "created": "2026-04-12"
+    }
+  ],
+  "last_updated": "2026-04-12T02:35:00+09:00"
+}

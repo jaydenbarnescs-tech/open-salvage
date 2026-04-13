@@ -1,12 +1,12 @@
 #!/opt/homebrew/bin/node
 'use strict';
-// mechatron-cron — Manage mechatron scheduled jobs via macOS LaunchAgents
+// salvage-cron — Manage salvage scheduled jobs via macOS LaunchAgents
 // Usage:
-//   mechatron-cron list                                   — list all mechatron cron jobs
-//   mechatron-cron add <name> --schedule <cron> --task <type> [--workspace <path>] -- [mechatron args]
-//   mechatron-cron remove <name>                          — remove a job
-//   mechatron-cron run <name>                             — run a job immediately
-//   mechatron-cron status <name>                          — show job status
+//   salvage-cron list                                   — list all salvage cron jobs
+//   salvage-cron add <name> --schedule <cron> --task <type> [--workspace <path>] -- [salvage args]
+//   salvage-cron remove <name>                          — remove a job
+//   salvage-cron run <name>                             — run a job immediately
+//   salvage-cron status <name>                          — show job status
 
 const fs = require('fs');
 const path = require('path');
@@ -14,11 +14,11 @@ const { execFileSync, execSync } = require('child_process');
 
 const HOME = process.env.HOME || '/Users/jayden.csai';
 const LAUNCH_AGENTS_DIR = path.join(HOME, 'Library/LaunchAgents');
-const MECHATRON_BIN = path.join(HOME, 'bin/mechatron');
-const STATE_DIR = path.join(HOME, '.mechatron/cron');
-const PREFIX = 'com.mechatron.cron';
+const SALVAGE_BIN = path.join(HOME, 'bin/salvage');
+const STATE_DIR = path.join(HOME, '.salvage/cron');
+const PREFIX = 'com.salvage.cron';
 
-function log(msg) { console.log(`[mechatron-cron] ${msg}`); }
+function log(msg) { console.log(`[salvage-cron] ${msg}`); }
 
 // ── Parse cron expression to LaunchAgent StartCalendarInterval ──────────
 function cronToCalendarInterval(expr) {
@@ -79,7 +79,7 @@ function cmdList() {
   } catch { plists = []; }
 
   if (plists.length === 0) {
-    log('No mechatron cron jobs found.');
+    log('No salvage cron jobs found.');
     return;
   }
 
@@ -106,17 +106,17 @@ function cmdAdd(name, args) {
   let schedule = null;
   let task = 'general';
   let workspace = null;
-  const mechatronArgs = [];
+  const salvageArgs = [];
   let inPassthrough = false;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--') { inPassthrough = true; continue; }
-    if (inPassthrough) { mechatronArgs.push(args[i]); continue; }
+    if (inPassthrough) { salvageArgs.push(args[i]); continue; }
     switch (args[i]) {
       case '--schedule': schedule = args[++i]; break;
       case '--task': task = args[++i]; break;
       case '--workspace': workspace = args[++i]; break;
-      default: mechatronArgs.push(args[i]);
+      default: salvageArgs.push(args[i]);
     }
   }
 
@@ -126,10 +126,10 @@ function cmdAdd(name, args) {
   const label = `${PREFIX}.${name}`;
   const logPath = path.join(HOME, `claude-agent/logs/cron-${name}.log`);
 
-  // Build mechatron command
-  const cmdArgs = [MECHATRON_BIN, '--task', task];
+  // Build salvage command
+  const cmdArgs = [SALVAGE_BIN, '--task', task];
   if (workspace) cmdArgs.push('--workspace', workspace);
-  cmdArgs.push('--fresh', ...mechatronArgs);
+  cmdArgs.push('--fresh', ...salvageArgs);
 
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -181,7 +181,7 @@ ${intervalToPlistDict(interval)}
   };
   saveState(state);
 
-  log(`Created job: ${name} (${schedule}) → mechatron --task ${task}`);
+  log(`Created job: ${name} (${schedule}) → salvage --task ${task}`);
   log(`Plist: ${plistPath}`);
   log(`Log: ${logPath}`);
 }
@@ -235,9 +235,9 @@ switch (cmd) {
   case 'status': cmdStatus(rest[0]); break;
   default:
     console.log(`Usage:
-  mechatron-cron list
-  mechatron-cron add <name> --schedule "M H D Mo W" --task <type> [--workspace <path>] -- [extra args]
-  mechatron-cron remove <name>
-  mechatron-cron run <name>
-  mechatron-cron status <name>`);
+  salvage-cron list
+  salvage-cron add <name> --schedule "M H D Mo W" --task <type> [--workspace <path>] -- [extra args]
+  salvage-cron remove <name>
+  salvage-cron run <name>
+  salvage-cron status <name>`);
 }

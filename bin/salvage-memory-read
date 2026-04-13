@@ -1,0 +1,25 @@
+#!/usr/bin/env node
+// salvage-memory-read — Read the agent's core memory file
+// Usage: salvage-memory-read
+// Returns the current contents of ~/clawd/salvage-core-memory.md
+// Falls back to vanessa-core-memory.md for backward compatibility
+
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const HOME = process.env.HOME || '/Users/jayden.csai';
+
+// Support both the new name and the legacy name
+const PRIMARY_PATH = path.join(HOME, 'clawd', 'salvage-core-memory.md');
+const LEGACY_PATH  = path.join(HOME, 'clawd', 'vanessa-core-memory.md');
+
+const CORE_MEMORY_PATH = fs.existsSync(PRIMARY_PATH) ? PRIMARY_PATH : LEGACY_PATH;
+
+try {
+  const content = fs.readFileSync(CORE_MEMORY_PATH, 'utf-8');
+  process.stdout.write(content + '\n');
+} catch (e) {
+  process.stderr.write(`[salvage-memory-read] ERROR: ${e.message}\n`);
+  process.exit(1);
+}

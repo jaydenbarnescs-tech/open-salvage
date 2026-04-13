@@ -34,60 +34,60 @@
       "examples": ["whisper-record.sh"]
     },
     {
-      "name": "mechatron-memory-search",
-      "command": "mechatron-memory-search",
+      "name": "salvage-memory-search",
+      "command": "salvage-memory-search",
       "args": ["<workspace>", "<query>"],
       "description": "Hybrid search (70% vector + 30% text) across workspace memory files. Uses SQLite FTS5 + bge-m3 embeddings via Ollama.",
       "examples": [
-        "mechatron-memory-search ~/.openclaw/workspace \"RENPHO project\"",
-        "mechatron-memory-search ~/clawd \"last meeting notes\""
+        "salvage-memory-search ~/.openclaw/workspace \"RENPHO project\"",
+        "salvage-memory-search ~/clawd \"last meeting notes\""
       ]
     },
     {
-      "name": "mechatron-memory-index",
-      "command": "mechatron-memory-index",
+      "name": "salvage-memory-index",
+      "command": "salvage-memory-index",
       "args": ["<workspace>"],
       "description": "Index workspace memory files into SQLite FTS5 with bge-m3 vector embeddings. Run before searching.",
-      "examples": ["mechatron-memory-index ~/.openclaw/workspace"]
+      "examples": ["salvage-memory-index ~/.openclaw/workspace"]
     },
     {
-      "name": "mechatron-cron",
-      "command": "mechatron-cron",
+      "name": "salvage-cron",
+      "command": "salvage-cron",
       "args": ["list|add|remove|run|status", "..."],
-      "description": "Manage mechatron scheduled jobs via macOS LaunchAgents. Create, remove, list, run, and check status of cron jobs.",
+      "description": "Manage salvage scheduled jobs via macOS LaunchAgents. Create, remove, list, run, and check status of cron jobs.",
       "examples": [
-        "mechatron-cron list",
-        "mechatron-cron add daily-report --schedule '0 9 * * *' --task general -- -p 'Generate daily report'"
+        "salvage-cron list",
+        "salvage-cron add daily-report --schedule '0 9 * * *' --task general -- -p 'Generate daily report'"
       ]
     },
     {
-      "name": "mechatron-tools",
-      "command": "mechatron-tools",
+      "name": "salvage-tools",
+      "command": "salvage-tools",
       "args": ["<workspace>", "<instruction>"],
       "description": "On-demand MCP tool execution. Spawns sub-agent with full MCP access (Notion, n8n, Slack, server, etc.) for one-shot tool tasks.",
       "examples": [
-        "mechatron-tools ~/clawd \"Read Notion page for RENPHO\"",
-        "mechatron-tools ~/clawd \"List active n8n workflows\""
+        "salvage-tools ~/clawd \"Read Notion page for RENPHO\"",
+        "salvage-tools ~/clawd \"List active n8n workflows\""
       ]
     },
     {
-      "name": "mechatron-spawn",
-      "command": "mechatron-spawn",
+      "name": "salvage-spawn",
+      "command": "salvage-spawn",
       "args": ["<workspace>", "<task-json or instruction>"],
       "description": "Spawn focused sub-agents for parallel/sequential task execution. Max 3 tasks per call, 60s timeout each, depth limit 1 (sub-agents cannot spawn more). Returns structured JSON results.",
       "examples": [
-        "mechatron-spawn ~/clawd '{\"tasks\":[{\"id\":\"t1\",\"instruction\":\"Research RENPHO competitors\"},{\"id\":\"t2\",\"instruction\":\"Draft outreach email template\"}]}'",
-        "mechatron-spawn ~/clawd \"Summarize the latest Slack messages in #mgc-all\" --parallel"
+        "salvage-spawn ~/clawd '{\"tasks\":[{\"id\":\"t1\",\"instruction\":\"Research RENPHO competitors\"},{\"id\":\"t2\",\"instruction\":\"Draft outreach email template\"}]}'",
+        "salvage-spawn ~/clawd \"Summarize the latest Slack messages in #mgc-all\" --parallel"
       ]
     },
     {
-      "name": "mechatron-ingest",
-      "command": "mechatron-ingest",
+      "name": "salvage-ingest",
+      "command": "salvage-ingest",
       "args": ["<workspace>", "--source slack|notion|sessions|all"],
       "description": "Pull knowledge from Slack, Notion, Claude sessions into workspace memory for RAG indexing. Run periodically to keep memory fresh.",
       "examples": [
-        "mechatron-ingest ~/clawd --source slack --reindex",
-        "mechatron-ingest ~/clawd --source all"
+        "salvage-ingest ~/clawd --source slack --reindex",
+        "salvage-ingest ~/clawd --source all"
       ]
     }
   ]

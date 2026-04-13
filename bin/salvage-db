@@ -1,34 +1,34 @@
 #!/bin/bash
-# mechatron-db — SQLite task database management
+# salvage-db — SQLite task database management
 # Patterns stolen from SwarmClaw (durable state machine) + OpenClaw (message outbox)
 #
 # Usage:
-#   mechatron-db init                          — create/migrate database
-#   mechatron-db task create <type> <payload>  — create a new task
-#   mechatron-db task claim <agent> <types>    — atomically claim next task
-#   mechatron-db task update <id> <status>     — update task status
-#   mechatron-db task heartbeat <id>           — extend visibility timeout
-#   mechatron-db task list [status]            — list tasks
-#   mechatron-db msg save <channel> <user> <text> [thread_ts]  — save pending message
-#   mechatron-db msg done <id>                 — mark message delivered
-#   mechatron-db msg fail <id> <error>         — mark message failed with backoff
-#   mechatron-db msg pending                   — list pending/retryable messages
-#   mechatron-db msg catchup                   — list messages ready for catch-up
-#   mechatron-db run start <task_id> <agent>   — record run start
-#   mechatron-db run end <run_id> <status>     — record run completion
-#   mechatron-db stalled                       — find stalled tasks (expired timeout)
-#   mechatron-db stats                         — show database stats
-#   mechatron-db mcp-claim <pid> <instruction> [workspace]  — claim MCP slot or queue
-#   mechatron-db mcp-next <pid>                — poller: promote oldest queued to running
-#   mechatron-db mcp-done <id> [result]        — mark MCP slot done
-#   mechatron-db mcp-failed <id> [error]       — mark MCP slot failed
-#   mechatron-db mcp-result <id>               — read MCP slot result (JSON)
-#   mechatron-db mcp-recover                   — reset running slots whose PID is dead
-#   mechatron-db mcp-list [status]             — list MCP slots
+#   salvage-db init                          — create/migrate database
+#   salvage-db task create <type> <payload>  — create a new task
+#   salvage-db task claim <agent> <types>    — atomically claim next task
+#   salvage-db task update <id> <status>     — update task status
+#   salvage-db task heartbeat <id>           — extend visibility timeout
+#   salvage-db task list [status]            — list tasks
+#   salvage-db msg save <channel> <user> <text> [thread_ts]  — save pending message
+#   salvage-db msg done <id>                 — mark message delivered
+#   salvage-db msg fail <id> <error>         — mark message failed with backoff
+#   salvage-db msg pending                   — list pending/retryable messages
+#   salvage-db msg catchup                   — list messages ready for catch-up
+#   salvage-db run start <task_id> <agent>   — record run start
+#   salvage-db run end <run_id> <status>     — record run completion
+#   salvage-db stalled                       — find stalled tasks (expired timeout)
+#   salvage-db stats                         — show database stats
+#   salvage-db mcp-claim <pid> <instruction> [workspace]  — claim MCP slot or queue
+#   salvage-db mcp-next <pid>                — poller: promote oldest queued to running
+#   salvage-db mcp-done <id> [result]        — mark MCP slot done
+#   salvage-db mcp-failed <id> [error]       — mark MCP slot failed
+#   salvage-db mcp-result <id>               — read MCP slot result (JSON)
+#   salvage-db mcp-recover                   — reset running slots whose PID is dead
+#   salvage-db mcp-list [status]             — list MCP slots
 
 set -euo pipefail
 
-DB="${MECHATRON_DB:-$HOME/clawd/sessions/agent.db}"
+DB="${SALVAGE_DB:-$HOME/clawd/sessions/agent.db}"
 SQLITE="/usr/bin/sqlite3"
 
 # Ensure directory exists
@@ -106,14 +106,14 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 
 -- MCP tool concurrency slots (two-tier dispatch: live run vs queued for poller)
--- status='running': a mechatron-tools process is actively executing right now
+-- status='running': a salvage-tools process is actively executing right now
 -- status='queued':  over the live limit; poller will promote and run it later
 -- status='done'/'failed': terminal — result/error stored here
 CREATE TABLE IF NOT EXISTS mcp_slots (
   id TEXT PRIMARY KEY,
   status TEXT NOT NULL DEFAULT 'queued'
     CHECK(status IN ('queued','running','done','failed')),
-  claimed_by INTEGER,            -- PID of the owning mechatron-tools process
+  claimed_by INTEGER,            -- PID of the owning salvage-tools process
   instruction TEXT,              -- first 200 chars of the tool instruction
   workspace TEXT,
   result TEXT,
@@ -287,7 +287,7 @@ mcp_recover() {
   fi
 }
 
-# Called by mechatron-tools on every MCP tool invocation.
+# Called by salvage-tools on every MCP tool invocation.
 # Recovers dead-PID slots first, then atomically inserts with correct status.
 # Output: "running|<id>" or "queued|<id>"
 mcp_claim() {
@@ -410,7 +410,7 @@ case "$CMD" in
       update) task_update "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
       heartbeat) task_heartbeat "${3:-}" ;;
       list) task_list "${3:-}" ;;
-      *) echo "Usage: mechatron-db task create|claim|update|heartbeat|list" ;;
+      *) echo "Usage: salvage-db task create|claim|update|heartbeat|list" ;;
     esac ;;
   msg)
     case "$SUB" in
@@ -419,13 +419,13 @@ case "$CMD" in
       fail) msg_fail "${3:-}" "${4:-}" ;;
       pending) msg_pending ;;
       catchup) msg_catchup ;;
-      *) echo "Usage: mechatron-db msg save|done|fail|pending|catchup" ;;
+      *) echo "Usage: salvage-db msg save|done|fail|pending|catchup" ;;
     esac ;;
   run)
     case "$SUB" in
       start) run_start "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
       end) run_end "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
-      *) echo "Usage: mechatron-db run start|end" ;;
+      *) echo "Usage: salvage-db run start|end" ;;
     esac ;;
   stalled) find_stalled ;;
   recover) recover_stalled ;;
@@ -439,29 +439,29 @@ case "$CMD" in
   mcp-recover) mcp_recover ;;
   mcp-list)    mcp_list    "${SUB:-}" ;;
   *)
-    echo "mechatron-db — SQLite task database for mechatron agents"
+    echo "salvage-db — SQLite task database for salvage agents"
     echo ""
     echo "Usage:"
-    echo "  mechatron-db init                          Initialize database"
-    echo "  mechatron-db task create <type> <payload>  Create task"
-    echo "  mechatron-db task claim <agent> <types>    Claim next task"
-    echo "  mechatron-db task update <id> <status>     Update task"
-    echo "  mechatron-db task heartbeat <id>           Extend timeout"
-    echo "  mechatron-db task list [status]            List tasks"
-    echo "  mechatron-db msg save <ch> <user> <text>   Save pending message"
-    echo "  mechatron-db msg done <id>                 Mark delivered"
-    echo "  mechatron-db msg fail <id> <error>         Mark failed + backoff"
-    echo "  mechatron-db msg pending                   List pending messages"
-    echo "  mechatron-db stalled                       Find stalled tasks"
-    echo "  mechatron-db recover                       Re-queue stalled tasks"
-    echo "  mechatron-db stats                         Show stats"
+    echo "  salvage-db init                          Initialize database"
+    echo "  salvage-db task create <type> <payload>  Create task"
+    echo "  salvage-db task claim <agent> <types>    Claim next task"
+    echo "  salvage-db task update <id> <status>     Update task"
+    echo "  salvage-db task heartbeat <id>           Extend timeout"
+    echo "  salvage-db task list [status]            List tasks"
+    echo "  salvage-db msg save <ch> <user> <text>   Save pending message"
+    echo "  salvage-db msg done <id>                 Mark delivered"
+    echo "  salvage-db msg fail <id> <error>         Mark failed + backoff"
+    echo "  salvage-db msg pending                   List pending messages"
+    echo "  salvage-db stalled                       Find stalled tasks"
+    echo "  salvage-db recover                       Re-queue stalled tasks"
+    echo "  salvage-db stats                         Show stats"
     echo ""
-    echo "  mechatron-db mcp-claim <pid> <instr> [ws]  Claim MCP slot or queue"
-    echo "  mechatron-db mcp-next <pid>                Promote oldest queued (poller)"
-    echo "  mechatron-db mcp-done <id> [result]        Mark MCP slot done"
-    echo "  mechatron-db mcp-failed <id> [error]       Mark MCP slot failed"
-    echo "  mechatron-db mcp-result <id>               Read MCP slot result (JSON)"
-    echo "  mechatron-db mcp-recover                   Reset slots with dead PIDs"
-    echo "  mechatron-db mcp-list [status]             List MCP slots"
+    echo "  salvage-db mcp-claim <pid> <instr> [ws]  Claim MCP slot or queue"
+    echo "  salvage-db mcp-next <pid>                Promote oldest queued (poller)"
+    echo "  salvage-db mcp-done <id> [result]        Mark MCP slot done"
+    echo "  salvage-db mcp-failed <id> [error]       Mark MCP slot failed"
+    echo "  salvage-db mcp-result <id>               Read MCP slot result (JSON)"
+    echo "  salvage-db mcp-recover                   Reset slots with dead PIDs"
+    echo "  salvage-db mcp-list [status]             List MCP slots"
     ;;
 esac

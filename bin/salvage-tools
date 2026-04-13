@@ -1,25 +1,25 @@
 #!/opt/homebrew/bin/node
 'use strict';
-// mechatron-tools — On-demand MCP tool execution
+// salvage-tools — On-demand MCP tool execution
 // Called by the agent when it needs to use an external tool (Notion, n8n, Slack, etc.)
-// Runs a one-shot mechatron call WITH MCP servers loaded.
+// Runs a one-shot salvage call WITH MCP servers loaded.
 //
 // Usage:
-//   mechatron-tools <workspace> "<instruction>"
+//   salvage-tools <workspace> "<instruction>"
 //
 // Examples:
-//   mechatron-tools ~/clawd "Read the Notion page for RENPHO project status"
-//   mechatron-tools ~/clawd "List active n8n workflows"
-//   mechatron-tools ~/clawd "Search Slack #mgc-all for messages about Komatsu from today"
-//   mechatron-tools ~/clawd "Deploy the latest commit on Vercel project komatsu-deploy"
+//   salvage-tools ~/clawd "Read the Notion page for RENPHO project status"
+//   salvage-tools ~/clawd "List active n8n workflows"
+//   salvage-tools ~/clawd "Search Slack #mgc-all for messages about Komatsu from today"
+//   salvage-tools ~/clawd "Deploy the latest commit on Vercel project komatsu-deploy"
 //
 // Concurrency:
-//   Uses mechatron-db mcp-claim to atomically acquire a running slot (max 5).
+//   Uses salvage-db mcp-claim to atomically acquire a running slot (max 5).
 //   If all slots are taken, this process exits with a structured JSON "queued" response
-//   and touches ~/.mechatron/dispatch-signal to wake the poller.
-//   The poller will later run the instruction via mcp-next + mechatron-tools.
+//   and touches ~/.salvage/dispatch-signal to wake the poller.
+//   The poller will later run the instruction via mcp-next + salvage-tools.
 //
-// When spawned by the poller (MECHATRON_FROM_POLLER=1 + MECHATRON_SLOT_ID=<id>):
+// When spawned by the poller (SALVAGE_FROM_POLLER=1 + SALVAGE_SLOT_ID=<id>):
 //   Skips the mcp-claim step entirely — slot is already claimed by the poller.
 
 const { spawn, execFileSync } = require('child_process');
@@ -27,11 +27,11 @@ const path = require('path');
 const fs = require('fs');
 
 const HOME = process.env.HOME || '/Users/jayden.csai';
-const MECHATRON    = path.join(HOME, 'bin/mechatron');
-const DB_CMD       = path.join(HOME, 'bin/mechatron-db');
+const SALVAGE    = path.join(HOME, 'bin/salvage');
+const DB_CMD       = path.join(HOME, 'bin/salvage-db');
 const MEM0_PYTHON  = path.join(HOME, 'claude-agent/mem0-env/bin/python');
 const MEM0_DIR     = path.join(HOME, 'claude-agent/mem0');
-const SIGNAL_FILE  = path.join(HOME, '.mechatron/dispatch-signal');
+const SIGNAL_FILE  = path.join(HOME, '.salvage/dispatch-signal');
 
 function getStandingInstructions() {
   try {
@@ -65,12 +65,12 @@ const WORKSPACE   = process.argv[2];
 const INSTRUCTION = process.argv[3];
 
 if (!WORKSPACE || !INSTRUCTION) {
-  console.error('Usage: mechatron-tools <workspace> "<instruction>"');
+  console.error('Usage: salvage-tools <workspace> "<instruction>"');
   console.error('');
   console.error('Examples:');
-  console.error('  mechatron-tools ~/clawd "Read Notion page for RENPHO"');
-  console.error('  mechatron-tools ~/clawd "List n8n workflows"');
-  console.error('  mechatron-tools ~/clawd "Post to Slack #mgc-all: meeting at 3pm"');
+  console.error('  salvage-tools ~/clawd "Read Notion page for RENPHO"');
+  console.error('  salvage-tools ~/clawd "List n8n workflows"');
+  console.error('  salvage-tools ~/clawd "Post to Slack #mgc-all: meeting at 3pm"');
   process.exit(1);
 }
 
@@ -78,8 +78,8 @@ const TIMEOUT_MS = 120_000; // 2 min max for a tool call
 
 // ── Concurrency gate (SQLite mcp_slots) ──────────────────────────────────
 // When spawned by the poller, the slot is already claimed — skip mcp-claim.
-const FROM_POLLER = !!process.env.MECHATRON_FROM_POLLER;
-let slotId = process.env.MECHATRON_SLOT_ID || null;
+const FROM_POLLER = !!process.env.SALVAGE_FROM_POLLER;
+let slotId = process.env.SALVAGE_SLOT_ID || null;
 
 if (!FROM_POLLER) {
   // Atomic slot claim: running (under limit) or queued (over limit).
@@ -88,7 +88,7 @@ if (!FROM_POLLER) {
     claimResult = dbExec(['mcp-claim', String(process.pid), INSTRUCTION.slice(0, 200), path.resolve(WORKSPACE)]);
   } catch (e) {
     // DB unavailable — log warning and proceed untracked (don't block the tool call)
-    console.error(`[mechatron-tools] WARNING: mcp-claim failed (DB unavailable?): ${e.message}`);
+    console.error(`[salvage-tools] WARNING: mcp-claim failed (DB unavailable?): ${e.message}`);
     claimResult = `running|fallback-${process.pid}`;
   }
 
@@ -125,7 +125,7 @@ function releaseSlot(success, resultOrError) {
       dbExec(['mcp-failed', slotId, (resultOrError || '').slice(0, 500)]);
     }
   } catch (e) {
-    console.error(`[mechatron-tools] WARNING: slot release failed: ${e.message}`);
+    console.error(`[salvage-tools] WARNING: slot release failed: ${e.message}`);
   }
 }
 
@@ -165,9 +165,9 @@ const args = [
 ];
 
 // Remove --no-mcp for this call (we WANT MCP here)
-// mechatron will load MCP because --no-mcp is not in args and --minimal doesn't skip MCP
+// salvage will load MCP because --no-mcp is not in args and --minimal doesn't skip MCP
 
-const child = spawn(MECHATRON, args, {
+const child = spawn(SALVAGE, args, {
   stdio: ['ignore', 'pipe', 'pipe'],
   env: {
     ...process.env,
@@ -187,7 +187,7 @@ const timer = setTimeout(() => {
   setTimeout(() => {
     try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch {} }
   }, 5000);
-  console.error('[mechatron-tools] Timed out after ' + (TIMEOUT_MS / 1000) + 's');
+  console.error('[salvage-tools] Timed out after ' + (TIMEOUT_MS / 1000) + 's');
   releaseSlot(false, 'Execution timed out after ' + (TIMEOUT_MS / 1000) + 's');
   console.log('[TIMEOUT] Tool execution timed out. The MCP servers may be slow to start.');
   process.exit(1);
@@ -196,7 +196,7 @@ const timer = setTimeout(() => {
 child.on('close', code => {
   clearTimeout(timer);
   if (code !== 0) {
-    process.stderr.write(`[mechatron-tools] Exit code ${code}\n`);
+    process.stderr.write(`[salvage-tools] Exit code ${code}\n`);
     if (stderr) process.stderr.write(stderr.slice(0, 500) + '\n');
   }
   const output = stdout.trim() || '[No output from tool execution]';
@@ -207,7 +207,7 @@ child.on('close', code => {
 
 child.on('error', err => {
   clearTimeout(timer);
-  console.error(`[mechatron-tools] Error: ${err.message}`);
+  console.error(`[salvage-tools] Error: ${err.message}`);
   releaseSlot(false, err.message);
   process.exit(1);
 });

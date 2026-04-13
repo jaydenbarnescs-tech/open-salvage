@@ -1,23 +1,23 @@
 #!/bin/bash
-# install.sh — Set up mechatron on a new Mac from this repo
+# install.sh — Set up salvage on a new Mac from this repo
 #
 # Run once after cloning:
 #   git clone https://github.com/jaydenbarnescs-tech/mgc-ai-workspace ~/clawd
 #   cd ~/clawd && bash install.sh
 #
 # What this does:
-#   1. Creates ~/bin/ symlinks for all mechatron* scripts
+#   1. Creates ~/bin/ symlinks for all salvage* scripts
 #   2. Copies LaunchAgent plists to ~/Library/LaunchAgents/
 #   3. Loads LaunchAgents (starts services)
 #   4. Installs claude-agent npm dependencies
-#   5. Creates ~/.mechatron/ config skeleton (you fill in secrets)
+#   5. Creates ~/.salvage/ config skeleton (you fill in secrets)
 
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
 HOME="${HOME:-/Users/$(whoami)}"
 
-echo "=== mechatron install ==="
+echo "=== salvage install ==="
 echo "Repo: $REPO"
 echo "Home: $HOME"
 echo ""
@@ -25,7 +25,7 @@ echo ""
 # ── 1. Symlink bin scripts ─────────────────────────────────────────────────
 echo "→ Linking bin scripts to ~/bin/..."
 mkdir -p "$HOME/bin"
-for script in "$REPO/bin"/mechatron*; do
+for script in "$REPO/bin"/salvage*; do
   name=$(basename "$script")
   target="$HOME/bin/$name"
   if [ -L "$target" ]; then
@@ -56,9 +56,9 @@ done
 echo ""
 echo "→ Loading LaunchAgents..."
 AGENTS=(
-  "com.mgc.mechatron-task-poller"
-  "com.mgc.mechatron-watchdog"
-  "com.mgc.mechatron-memory"
+  "com.mgc.salvage-task-poller"
+  "com.mgc.salvage-watchdog"
+  "com.mgc.salvage-memory"
   "ai.openclaw.gateway"
 )
 for agent in "${AGENTS[@]}"; do
@@ -75,28 +75,28 @@ if [ -f "$REPO/claude-agent/package.json" ]; then
   (cd "$REPO/claude-agent" && npm install --silent 2>/dev/null && echo "  npm install done") || echo "  WARNING: npm install failed"
 fi
 
-# ── 5. ~/.mechatron/ config skeleton ──────────────────────────────────────
+# ── 5. ~/.salvage/ config skeleton ──────────────────────────────────────
 echo ""
-echo "→ Setting up ~/.mechatron/..."
-mkdir -p "$HOME/.mechatron/cron"
+echo "→ Setting up ~/.salvage/..."
+mkdir -p "$HOME/.salvage/cron"
 
-if [ ! -f "$HOME/.mechatron/config.json" ]; then
-  cp "$REPO/config/mechatron-config.json" "$HOME/.mechatron/config.json"
-  sed -i '' "s|/Users/jayden.csai|$HOME|g" "$HOME/.mechatron/config.json" 2>/dev/null || true
-  echo "  created: ~/.mechatron/config.json"
+if [ ! -f "$HOME/.salvage/config.json" ]; then
+  cp "$REPO/config/salvage-config.json" "$HOME/.salvage/config.json"
+  sed -i '' "s|/Users/jayden.csai|$HOME|g" "$HOME/.salvage/config.json" 2>/dev/null || true
+  echo "  created: ~/.salvage/config.json"
 fi
 
-if [ ! -f "$HOME/.mechatron/tools.json" ]; then
-  cp "$REPO/config/mechatron-tools.json" "$HOME/.mechatron/tools.json"
-  sed -i '' "s|/Users/jayden.csai|$HOME|g" "$HOME/.mechatron/tools.json" 2>/dev/null || true
-  echo "  created: ~/.mechatron/tools.json"
+if [ ! -f "$HOME/.salvage/tools.json" ]; then
+  cp "$REPO/config/salvage-tools.json" "$HOME/.salvage/tools.json"
+  sed -i '' "s|/Users/jayden.csai|$HOME|g" "$HOME/.salvage/tools.json" 2>/dev/null || true
+  echo "  created: ~/.salvage/tools.json"
 fi
 
-if [ ! -f "$HOME/.mechatron/mcp-config.json" ]; then
-  cp "$REPO/config/mcp-config.example.json" "$HOME/.mechatron/mcp-config.json"
-  echo "  created: ~/.mechatron/mcp-config.json (NEEDS SECRETS — edit before use)"
+if [ ! -f "$HOME/.salvage/mcp-config.json" ]; then
+  cp "$REPO/config/mcp-config.example.json" "$HOME/.salvage/mcp-config.json"
+  echo "  created: ~/.salvage/mcp-config.json (NEEDS SECRETS — edit before use)"
   echo ""
-  echo "  ⚠️  Fill in these values in ~/.mechatron/mcp-config.json:"
+  echo "  ⚠️  Fill in these values in ~/.salvage/mcp-config.json:"
   echo "     SLACK_BOT_TOKEN     — Slack bot token (xoxb-...)"
   echo "     GOOGLE_AI_API_KEY   — Google AI key for image generation"
 fi
@@ -104,13 +104,13 @@ fi
 # ── 6. Initialise database ─────────────────────────────────────────────────
 echo ""
 echo "→ Initialising agent database..."
-WORKSPACE="${MECHATRON_WORKSPACE:-$HOME/clawd}"
+WORKSPACE="${SALVAGE_WORKSPACE:-$HOME/clawd}"
 mkdir -p "$WORKSPACE/sessions"
-"$HOME/bin/mechatron-db" init 2>/dev/null && echo "  DB ready: $WORKSPACE/sessions/agent.db" || echo "  WARNING: DB init failed"
+"$HOME/bin/salvage-db" init 2>/dev/null && echo "  DB ready: $WORKSPACE/sessions/agent.db" || echo "  WARNING: DB init failed"
 
 echo ""
 echo "=== install complete ==="
 echo ""
 echo "Next steps:"
-echo "  1. Edit ~/.mechatron/mcp-config.json and fill in secrets"
-echo "  2. Run: mechatron --workspace ~/clawd --task general -p 'hello'"
+echo "  1. Edit ~/.salvage/mcp-config.json and fill in secrets"
+echo "  2. Run: salvage --workspace ~/clawd --task general -p 'hello'"

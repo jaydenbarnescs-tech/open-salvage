@@ -1,16 +1,16 @@
 #!/opt/homebrew/bin/node
 'use strict';
-// mechatron-spawn — Sub-agent spawner with full safeguards
+// salvage-spawn — Sub-agent spawner with full safeguards
 // Called by the parent agent when it needs to delegate focused sub-tasks.
 //
 // Usage:
-//   mechatron-spawn <workspace> <task-json>
+//   salvage-spawn <workspace> <task-json>
 //
 // task-json format:
 //   {"tasks": [{"id": "t1", "instruction": "Research X"}, {"id": "t2", "instruction": "Write Y"}]}
 //
 // Or single task:
-//   mechatron-spawn <workspace> "<instruction>"
+//   salvage-spawn <workspace> "<instruction>"
 //
 // Safeguards (歯止め対策):
 //   - maxDepth: 1 (sub-agents CANNOT spawn further sub-agents)
@@ -26,7 +26,7 @@ const fs = require('fs');
 const path = require('path');
 
 const HOME = process.env.HOME || '/Users/jayden.csai';
-const MECHATRON   = path.join(HOME, 'bin/mechatron');
+const SALVAGE   = path.join(HOME, 'bin/salvage');
 const MEM0_PYTHON = path.join(HOME, 'claude-agent/mem0-env/bin/python');
 const MEM0_DIR    = path.join(HOME, 'claude-agent/mem0');
 
@@ -58,9 +58,9 @@ const TIMEOUT_MS = 60000;   // 60 seconds per sub-agent
 const STALL_DETECT_MS = 30000; // kill if no output for 30s
 
 // ── Depth check ──────────────────────────────────────────────────────────
-const currentDepth = parseInt(process.env.MECHATRON_SPAWN_DEPTH || '0');
+const currentDepth = parseInt(process.env.SALVAGE_SPAWN_DEPTH || '0');
 if (currentDepth >= MAX_DEPTH) {
-  console.error(`[mechatron-spawn] BLOCKED: depth ${currentDepth} >= max ${MAX_DEPTH}. Sub-agents cannot spawn sub-agents.`);
+  console.error(`[salvage-spawn] BLOCKED: depth ${currentDepth} >= max ${MAX_DEPTH}. Sub-agents cannot spawn sub-agents.`);
   console.log(JSON.stringify({
     status: 'forbidden',
     error: `Spawn depth ${currentDepth} exceeds maximum ${MAX_DEPTH}`,
@@ -74,7 +74,7 @@ const WORKSPACE = process.argv[2];
 const taskArg = process.argv[3];
 
 if (!WORKSPACE || !taskArg) {
-  console.error('Usage: mechatron-spawn <workspace> \'{"tasks":[{"id":"t1","instruction":"..."}]}\' OR mechatron-spawn <workspace> "<instruction>"');
+  console.error('Usage: salvage-spawn <workspace> \'{"tasks":[{"id":"t1","instruction":"..."}]}\' OR salvage-spawn <workspace> "<instruction>"');
   process.exit(1);
 }
 
@@ -89,12 +89,12 @@ try {
 
 // ── Children limit ───────────────────────────────────────────────────────
 if (tasks.length > MAX_CHILDREN_PER_CALL) {
-  console.error(`[mechatron-spawn] WARNING: ${tasks.length} tasks exceeds max ${MAX_CHILDREN_PER_CALL}. Truncating.`);
+  console.error(`[salvage-spawn] WARNING: ${tasks.length} tasks exceeds max ${MAX_CHILDREN_PER_CALL}. Truncating.`);
   tasks = tasks.slice(0, MAX_CHILDREN_PER_CALL);
 }
 
 function log(msg) {
-  process.stderr.write(`[mechatron-spawn] ${new Date().toISOString()} ${msg}\n`);
+  process.stderr.write(`[salvage-spawn] ${new Date().toISOString()} ${msg}\n`);
 }
 
 // ── Run single sub-agent ─────────────────────────────────────────────────
@@ -125,11 +125,11 @@ function runSubAgent(task) {
 
     log(`Starting sub-agent: ${taskId} — ${task.instruction.slice(0, 80)}`);
 
-    const child = spawn(MECHATRON, args, {
+    const child = spawn(SALVAGE, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        MECHATRON_SPAWN_DEPTH: String(currentDepth + 1),
+        SALVAGE_SPAWN_DEPTH: String(currentDepth + 1),
         PATH: `${HOME}/bin:/opt/homebrew/bin:/opt/homebrew/opt/node/bin:/usr/local/bin:/usr/bin:/bin`,
         HOME,
       },

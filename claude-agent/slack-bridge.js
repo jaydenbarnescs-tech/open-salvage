@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// ── Slack Bridge via Mechatron ─────────────────────────────────────────
-// Listens on Slack Socket Mode, pipes messages through mechatron wrapper,
-// and posts responses back. All context assembly handled by mechatron.
+// ── Slack Bridge via Salvage ─────────────────────────────────────────
+// Listens on Slack Socket Mode, pipes messages through salvage wrapper,
+// and posts responses back. All context assembly handled by salvage.
 // ────────────────────────────────────────────────────────────────────────
 
 const { App } = require("@slack/bolt");
@@ -10,7 +10,7 @@ const fs = require("fs");
 const path = require("path");
 
 // ── Database helper with better-sqlite3 (proper async support) ──────────
-const DB_CMD = path.join(process.env.HOME, "bin", "mechatron-db");
+const DB_CMD = path.join(process.env.HOME, "bin", "salvage-db");
 let db = null;
 
 // Lazy-load database connection
@@ -23,7 +23,7 @@ function getDb() {
       db.pragma("journal_mode = WAL");
       db.pragma("synchronous = NORMAL");
     } catch (e) {
-      log("warn", "better-sqlite3 not available, falling back to mechatron-db CLI", { error: e.message });
+      log("warn", "better-sqlite3 not available, falling back to salvage-db CLI", { error: e.message });
       return null;
     }
   }
@@ -156,7 +156,7 @@ const SLACK_BOT_TOKEN =
 const SLACK_APP_TOKEN =
   process.env.SLACK_APP_TOKEN || "";
 
-const MECHATRON = path.join(process.env.HOME, "bin", "mechatron");
+const SALVAGE = path.join(process.env.HOME, "bin", "salvage");
 const WORKSPACE = path.join(process.env.HOME, "clawd");
 const LOG_DIR = path.join(process.env.HOME, "claude-agent", "logs");
 const LOG_FILE = path.join(LOG_DIR, "bridge.log");
@@ -165,7 +165,7 @@ const MODEL_SONNET = "claude-sonnet-4-6";
 const MODEL_HAIKU  = "claude-haiku-4-5-20251001";
 const MAX_TURNS = 50;
 
-// ── Process Pool for mechatron spawns (prevent resource exhaustion) ──────
+// ── Process Pool for salvage spawns (prevent resource exhaustion) ──────
 const MAX_CONCURRENT_SPAWNS = 3;
 let activeSpawns = 0;
 const spawnQueue = [];
@@ -179,7 +179,7 @@ async function spawnWithPool(args, env) {
       }
       activeSpawns++;
 
-      const child = spawn(MECHATRON, args, { stdio: ["ignore", "pipe", "pipe"], env });
+      const child = spawn(SALVAGE, args, { stdio: ["ignore", "pipe", "pipe"], env });
       let stdout = "";
       let stderr = "";
 
@@ -192,7 +192,7 @@ async function spawnWithPool(args, env) {
         if (next) next();
 
         if (code !== 0) {
-          reject(new Error(`Mechatron exited with code ${code}: ${(stderr || stdout || "").slice(0, 300)}`));
+          reject(new Error(`Salvage exited with code ${code}: ${(stderr || stdout || "").slice(0, 300)}`));
         } else {
           resolve({ stdout: stdout.trim(), stderr });
         }
@@ -389,8 +389,8 @@ async function removeReaction(client, channel, ts, emoji) {
   } catch (_) {}
 }
 
-// ── Call mechatron (with optional streaming callback) ────────────────────
-async function callMechatron(prompt, sessionKey, onChunk, model) {
+// ── Call salvage (with optional streaming callback) ────────────────────
+async function callSalvage(prompt, sessionKey, onChunk, model) {
   // Use provided model or select based on prompt
   const chosenModel = model || selectModel(prompt);
 
@@ -406,7 +406,7 @@ async function callMechatron(prompt, sessionKey, onChunk, model) {
     "--dangerously-skip-permissions",
   ];
 
-  log("info", "calling mechatron", {
+  log("info", "calling salvage", {
     workspace: WORKSPACE,
     session: sessionKey,
     model: chosenModel,
@@ -422,7 +422,7 @@ async function callMechatron(prompt, sessionKey, onChunk, model) {
 
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
-      reject(new Error("Mechatron timed out after " + TIMEOUT_MS / 1000 + "s"));
+      reject(new Error("Salvage timed out after " + TIMEOUT_MS / 1000 + "s"));
     }, TIMEOUT_MS);
 
     spawnWithPool(args, env)
@@ -431,12 +431,12 @@ async function callMechatron(prompt, sessionKey, onChunk, model) {
         if (onChunk) {
           try { onChunk(stdout); } catch {}
         }
-        log("info", "mechatron responded", { len: stdout.length });
+        log("info", "salvage responded", { len: stdout.length });
         resolve(stdout);
       })
       .catch((err) => {
         clearTimeout(timer);
-        log("error", "mechatron failed", {
+        log("error", "salvage failed", {
           error: err.message?.slice(0, 500),
         });
         reject(err);
@@ -590,7 +590,7 @@ async function main() {
 
       const chosenModel = selectModel(userText);
       log("info", "model selected", { model: chosenModel, len: userText.length });
-      const response = await callMechatron(prompt, sessionKey, onChunk, chosenModel);
+      const response = await callSalvage(prompt, sessionKey, onChunk, chosenModel);
 
       // Status: 👀 → ✅
       await removeReaction(client, channelId, reactionTs, "eyes");
@@ -648,8 +648,8 @@ async function main() {
 
       // Clean error message — don't dump raw stderr to the user
       let userMessage = err.message || 'Unknown error';
-      // Strip mechatron log lines from error
-      userMessage = userMessage.replace(/\[mechatron\][^\n]*/g, '').trim();
+      // Strip salvage log lines from error
+      userMessage = userMessage.replace(/\[salvage\][^\n]*/g, '').trim();
       // Truncate long errors
       if (userMessage.length > 200) userMessage = userMessage.slice(0, 200) + '...';
       // If it's a known category, show a friendly message
@@ -704,7 +704,7 @@ async function main() {
 
     try {
       const chosenModel = selectModel(userText);
-      const response = await callMechatron(prompt, sessionKey, null, chosenModel);
+      const response = await callSalvage(prompt, sessionKey, null, chosenModel);
 
       await removeReaction(client, channelId, event.ts, "eyes");
       await addReaction(client, channelId, event.ts, "white_check_mark");
@@ -773,7 +773,7 @@ async function main() {
       });
 
       const chosenModel = selectModel(userText);
-      const response = await callMechatron(prompt, sessionKey, null, chosenModel);
+      const response = await callSalvage(prompt, sessionKey, null, chosenModel);
 
       await respond({
         text: response,
@@ -803,7 +803,7 @@ async function main() {
         const apologyPrefix = "先ほどのメッセージに対応できず申し訳ございません。今から対応します。\n\n";
         const sessionKey = buildSessionKey(msg.channel, msg.user_id, msg.thread_ts);
         const prompt = `${apologyPrefix}[Catch-up: Slack message from <@${msg.user_id}> in <#${msg.channel}>]\n${msg.message_text}`;
-        const response = await callMechatron(prompt, sessionKey);
+        const response = await callSalvage(prompt, sessionKey);
 
         const threadTs = msg.thread_ts || msg.id; // best effort thread
         await app.client.chat.postMessage({
@@ -855,7 +855,7 @@ Jaydenの代わりにVanessaがお返事いたします。
 
           const sessionKey = `claw:hisho:${action.channel}`;
           const chosenModel = selectModel(prompt);
-          const response = await callMechatron(prompt, sessionKey, null, chosenModel);
+          const response = await callSalvage(prompt, sessionKey, null, chosenModel);
 
           await app.client.chat.postMessage({
             channel: action.channel,
@@ -885,7 +885,7 @@ Jaydenの代わりにVanessaがお返事いたします。
 
           const sessionKey = `claw:hisho:dm`;
           const chosenModel = selectModel(prompt);
-          const response = await callMechatron(prompt, sessionKey, null, chosenModel);
+          const response = await callSalvage(prompt, sessionKey, null, chosenModel);
 
           await app.client.chat.postMessage({
             channel: JAYDEN_DM_CHANNEL,
@@ -914,7 +914,7 @@ Jaydenの代わりにVanessaがお返事いたします。
 
   // ── Start ───────────────────────────────────────────────────────────
   await app.start();
-  log("info", "slack bridge running (via mechatron)", {
+  log("info", "slack bridge running (via salvage)", {
     socketMode: true,
     defaultModel: MODEL_HAIKU,
     modelStrategy: `${MODEL_HAIKU} (default) / ${MODEL_SONNET} (complex)`,
@@ -923,7 +923,7 @@ Jaydenの代わりにVanessaがお返事いたします。
     workspace: WORKSPACE,
   });
   console.error(
-    `[${new Date().toISOString()}] Slack bridge running via mechatron (workspace=${WORKSPACE}, default_model=${MODEL_HAIKU})`
+    `[${new Date().toISOString()}] Slack bridge running via salvage (workspace=${WORKSPACE}, default_model=${MODEL_HAIKU})`
   );
 }
 

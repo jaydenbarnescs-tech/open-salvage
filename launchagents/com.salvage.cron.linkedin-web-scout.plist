@@ -3,30 +3,30 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.mechatron.cron.linkedin-strategy</string>
+    <string>com.salvage.cron.linkedin-web-scout</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/jayden.csai/bin/mechatron</string>
+        <string>/Users/jayden.csai/bin/salvage</string>
         <string>--task</string>
         <string>general</string>
         <string>--workspace</string>
         <string>/Users/jayden.csai/clawd</string>
         <string>--fresh</string>
-        <string>Run linkedin-content skill Mode 0: Pick 1 strategy topic. Write long-form LinkedIn draft (500-800 words).</string>
+        <string>Run linkedin-content skill Mode 2: Search web + Slack for 1 interesting AI/startup/Japan story. Draft post.</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
         <key>Minute</key>
         <integer>0</integer>
         <key>Hour</key>
-        <integer>7</integer>
+        <integer>8</integer>
     </dict>
     <key>RunAtLoad</key>
     <false/>
     <key>StandardOutPath</key>
-    <string>/Users/jayden.csai/claude-agent/logs/cron-linkedin-strategy.log</string>
+    <string>/Users/jayden.csai/claude-agent/logs/cron-linkedin-web-scout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/jayden.csai/claude-agent/logs/cron-linkedin-strategy.log</string>
+    <string>/Users/jayden.csai/claude-agent/logs/cron-linkedin-web-scout.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>

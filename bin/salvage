@@ -9,9 +9,9 @@ const { execFileSync, spawn } = require('child_process');
 // ── Constants ────────────────────────────────────────────────────────────
 const HOME = process.env.HOME || '/Users/jayden.csai';
 const DEFAULT_WORKSPACE = path.join(HOME, '.openclaw/workspace');
-const GLOBAL_SKILLS_DIR = path.join(HOME, '.mechatron/skills');
-const GLOBAL_CONFIG_PATH = path.join(HOME, '.mechatron/config.json');
-const GLOBAL_MCP_CONFIG = path.join(HOME, '.mechatron/mcp-config.json');
+const GLOBAL_SKILLS_DIR = path.join(HOME, '.salvage/skills');
+const GLOBAL_CONFIG_PATH = path.join(HOME, '.salvage/config.json');
+const GLOBAL_MCP_CONFIG = path.join(HOME, '.salvage/mcp-config.json');
 // Auto-detect Claude binary — survives version updates
 const CLAUDE_BIN = (() => {
   const candidates = [
@@ -82,7 +82,7 @@ const SYSTEM_PROMPT_MAX_RATIO = 0.4;  // system prompt should use at most 40% of
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 function log(msg) {
-  process.stderr.write(`[mechatron] ${new Date().toISOString()} ${msg}\n`);
+  process.stderr.write(`[salvage] ${new Date().toISOString()} ${msg}\n`);
 }
 
 function dateStr(offset = 0) {
@@ -206,7 +206,7 @@ function deriveSessionKey(workspace, taskType, explicitKey) {
       // One-shot tasks — no session continuity
       return null;
     default:
-      return `mechatron:${agentId}:main`;
+      return `salvage:${agentId}:main`;
   }
 }
 
@@ -270,7 +270,7 @@ function formatUserFacingError(code, stderr, stdout) {
 
   // Auth errors
   if (err.includes('not logged in') || err.includes('please run /login') || err.includes('oauth') || err.includes('unauthorized'))
-    return { category: 'auth', message: 'Authentication expired. Mechatron will try to refresh. If this persists, run: /opt/homebrew/bin/claude auth login', canAutoFix: true };
+    return { category: 'auth', message: 'Authentication expired. Salvage will try to refresh. If this persists, run: /opt/homebrew/bin/claude auth login', canAutoFix: true };
 
   // Rate limit
   if (err.includes('rate limit') || err.includes('429') || err.includes('too many requests'))
@@ -480,11 +480,11 @@ async function executeHooks(workspace, eventName, context) {
           timeout: 10000,
           env: {
             ...process.env,
-            MECHATRON_WORKSPACE: workspace,
-            MECHATRON_TASK: context.taskType || '',
-            MECHATRON_SESSION_KEY: context.sessionKey || '',
-            MECHATRON_PROMPT_TOKENS: String(context.promptTokens || 0),
-            MECHATRON_EXIT_CODE: String(context.exitCode || 0),
+            SALVAGE_WORKSPACE: workspace,
+            SALVAGE_TASK: context.taskType || '',
+            SALVAGE_SESSION_KEY: context.sessionKey || '',
+            SALVAGE_PROMPT_TOKENS: String(context.promptTokens || 0),
+            SALVAGE_EXIT_CODE: String(context.exitCode || 0),
           },
         });
       } else if (hook.type === 'module') {
@@ -504,14 +504,14 @@ async function executeHooks(workspace, eventName, context) {
 }
 
 // ── Plugin System ────────────────────────────────────────────────────────
-// Plugins are directories in {workspace}/plugins/ or ~/.mechatron/plugins/
+// Plugins are directories in {workspace}/plugins/ or ~/.salvage/plugins/
 // Each plugin directory contains a manifest.json:
 //   { name, description, provides: ["context"|"hook"|"tool"], entry: "index.js" }
 
 function discoverPlugins(workspace) {
   const pluginDirs = [
     path.join(workspace, 'plugins'),
-    path.join(HOME, '.mechatron/plugins'),
+    path.join(HOME, '.salvage/plugins'),
   ];
 
   const plugins = [];
@@ -700,7 +700,7 @@ if (!fs.existsSync(WORKSPACE)) {
 
 // ── Load config ──────────────────────────────────────────────────────────
 // Workspace config takes priority over global
-const wsConfigPath = path.join(WORKSPACE, 'mechatron.json');
+const wsConfigPath = path.join(WORKSPACE, 'salvage.json');
 let config;
 try {
   config = JSON.parse(fs.readFileSync(
@@ -876,7 +876,7 @@ if (!noMemory && !minimal) {
     memoryLines.push(...hints);
   }
   memoryLines.push('');
-  memoryLines.push(`To search across all memory files, run: mechatron-memory-search "${WORKSPACE}" "<query>"`);
+  memoryLines.push(`To search across all memory files, run: salvage-memory-search "${WORKSPACE}" "<query>"`);
   memoryLines.push('This searches MEMORY.md and all daily notes. Returns matching lines with context.');
   sections.push(`# Memory\n\n${memoryLines.join('\n')}`);
 }
@@ -884,7 +884,7 @@ if (!noMemory && !minimal) {
 // ── 3b. CLI tools auto-discovery + External tool access ─────────────────
 
 // Auto-discover from tools.json registry
-const TOOLS_REGISTRY = path.join(HOME, '.mechatron/tools.json');
+const TOOLS_REGISTRY = path.join(HOME, '.salvage/tools.json');
 const cliToolLines = [];
 
 try {
@@ -934,14 +934,14 @@ sections.push(`# External Tools
 When you need to use external services (Notion, n8n, Slack API, server management, GitHub, image generation, etc.), use this command:
 
 \`\`\`
-mechatron-tools "${WORKSPACE}" "<describe what you need done>"
+salvage-tools "${WORKSPACE}" "<describe what you need done>"
 \`\`\`
 
 This spawns a sub-agent with full MCP tool access. Examples:
-- \`mechatron-tools "${WORKSPACE}" "Read the Notion page for RENPHO project"\`
-- \`mechatron-tools "${WORKSPACE}" "List active n8n workflows"\`
-- \`mechatron-tools "${WORKSPACE}" "Search Google for latest AI agent frameworks"\`
-- \`mechatron-tools "${WORKSPACE}" "Post to Slack channel C09DR06AY3V: meeting at 3pm"\`
+- \`salvage-tools "${WORKSPACE}" "Read the Notion page for RENPHO project"\`
+- \`salvage-tools "${WORKSPACE}" "List active n8n workflows"\`
+- \`salvage-tools "${WORKSPACE}" "Search Google for latest AI agent frameworks"\`
+- \`salvage-tools "${WORKSPACE}" "Post to Slack channel C09DR06AY3V: meeting at 3pm"\`
 
 The sub-agent has access to: Notion, n8n, GitHub, ElevenLabs, LINE, Apify, Serper web search, Oracle VM server management, Supabase, Google Slides/Docs, Instagram, Unsplash, Slack, Vercel, and Gemini image generation.
 
@@ -952,12 +952,12 @@ Use this when you need data from external services. For simple conversation, do 
 When you need to divide a large task into parallel or sequential sub-tasks, use:
 
 \`\`\`
-mechatron-spawn "${WORKSPACE}" '{"tasks":[{"id":"t1","instruction":"Do X"},{"id":"t2","instruction":"Do Y"}]}'
+salvage-spawn "${WORKSPACE}" '{"tasks":[{"id":"t1","instruction":"Do X"},{"id":"t2","instruction":"Do Y"}]}'
 \`\`\`
 
 Or for a single focused sub-task:
 \`\`\`
-mechatron-spawn "${WORKSPACE}" "Do this specific thing"
+salvage-spawn "${WORKSPACE}" "Do this specific thing"
 \`\`\`
 
 Add \`--parallel\` flag to run tasks simultaneously (max 3 concurrent).
@@ -1070,7 +1070,7 @@ if (budget.status === 'critical' && !dryRun) {
 // ── Dry run ──────────────────────────────────────────────────────────────
 if (dryRun) {
   process.stdout.write(systemPromptWithRecovery);
-  process.stdout.write(`\n\n--- MECHATRON v2 DRY RUN ---\n`);
+  process.stdout.write(`\n\n--- SALVAGE v2 DRY RUN ---\n`);
   process.stdout.write(`Workspace: ${WORKSPACE}\n`);
   process.stdout.write(`Task: ${taskType}\n`);
   process.stdout.write(`Session key: ${resolvedSessionKey || '(none)'}\n`);
@@ -1102,7 +1102,7 @@ if (dryRun) {
 }
 
 // ── 7. Write system prompt to temp file ──────────────────────────────────
-const tmpFile = path.join(os.tmpdir(), `mechatron-${Date.now()}.txt`);
+const tmpFile = path.join(os.tmpdir(), `salvage-${Date.now()}.txt`);
 fs.writeFileSync(tmpFile, systemPromptWithRecovery, 'utf-8');
 
 function cleanup() {
@@ -1233,7 +1233,7 @@ async function appendDailyNote(userPrompt) {
 // ── Main (with Preflight + Failover Cascade) ────────────────────────────
 async function main() {
   // Propagate SIGTERM to active claude child so it doesn't orphan when
-  // mechatron-tools (or any parent) kills this process on timeout.
+  // salvage-tools (or any parent) kills this process on timeout.
   process.on('SIGTERM', () => {
     if (activeClaudeChild && !activeClaudeChild.killed) {
       activeClaudeChild.kill('SIGTERM');
@@ -1259,7 +1259,7 @@ async function main() {
     }
 
     // ── Task lifecycle: mark as running ─────────────────────────────
-    const DB_CMD = path.join(HOME, 'bin/mechatron-db');
+    const DB_CMD = path.join(HOME, 'bin/salvage-db');
     let heartbeatInterval = null;
     if (taskId) {
       try {

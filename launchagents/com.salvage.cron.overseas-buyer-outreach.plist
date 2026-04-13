@@ -10,10 +10,10 @@
 		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/jayden.csai/bin</string>
 	</dict>
 	<key>Label</key>
-	<string>com.mechatron.cron.overseas-buyer-outreach</string>
+	<string>com.salvage.cron.overseas-buyer-outreach</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/jayden.csai/bin/mechatron</string>
+		<string>/Users/jayden.csai/bin/salvage</string>
 		<string>--task</string>
 		<string>general</string>
 		<string>--workspace</string>

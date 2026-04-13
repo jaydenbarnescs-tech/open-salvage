@@ -1,7 +1,7 @@
 #!/opt/homebrew/bin/node
 'use strict';
-// mechatron-memory-index — Index workspace memory files into SQLite FTS5 + vector embeddings
-// Usage: mechatron-memory-index <workspace> [--no-vectors]
+// salvage-memory-index — Index workspace memory files into SQLite FTS5 + vector embeddings
+// Usage: salvage-memory-index <workspace> [--no-vectors]
 // Creates/updates {workspace}/sessions/memory.db
 
 const fs = require('fs');
@@ -11,7 +11,7 @@ const crypto = require('crypto');
 const http = require('http');
 
 const WORKSPACE = process.argv[2];
-if (!WORKSPACE) { console.error('Usage: mechatron-memory-index <workspace> [--no-vectors]'); process.exit(1); }
+if (!WORKSPACE) { console.error('Usage: salvage-memory-index <workspace> [--no-vectors]'); process.exit(1); }
 
 const NO_VECTORS = process.argv.includes('--no-vectors');
 const DB_PATH = path.join(WORKSPACE, 'sessions', 'memory.db');

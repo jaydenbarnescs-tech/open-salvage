@@ -1,7 +1,7 @@
 #!/bin/bash
-# mechatron-task-poller — Checks for pending/stalled tasks and processes them
+# salvage-task-poller — Checks for pending/stalled tasks and processes them
 # Runs every 60 seconds via LaunchAgent (heartbeat fallback).
-# Also wakes immediately when ~/.mechatron/dispatch-signal is touched.
+# Also wakes immediately when ~/.salvage/dispatch-signal is touched.
 #
 # Responsibilities:
 #   1. Recover and re-queue stalled background tasks (SwarmClaw supervisor recovery)
@@ -11,10 +11,10 @@
 set -euo pipefail
 
 HOME="${HOME:-/Users/jayden.csai}"
-DB_CMD="$HOME/bin/mechatron-db"
-MECHATRON_TOOLS="$HOME/bin/mechatron-tools"
+DB_CMD="$HOME/bin/salvage-db"
+SALVAGE_TOOLS="$HOME/bin/salvage-tools"
 LOG="$HOME/claude-agent/logs/task-poller.log"
-SIGNAL_FILE="$HOME/.mechatron/dispatch-signal"
+SIGNAL_FILE="$HOME/.salvage/dispatch-signal"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG"; }
 
@@ -48,7 +48,7 @@ tasks.slice(0, 2).forEach(t => console.log(JSON.stringify(t)));
 
     PROMPT=$(echo "$TASK_PAYLOAD" | /opt/homebrew/bin/node -e "try{const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'));console.log(d.description||d.instruction||d.prompt||JSON.stringify(d))}catch(e){console.log('Process this task')}" 2>/dev/null)
 
-    "$HOME/bin/mechatron" \
+    "$HOME/bin/salvage" \
       --workspace "$WORKSPACE" \
       --task "$TASK_TYPE" \
       --task-id "$TASK_ID" \
@@ -93,10 +93,10 @@ while [ "$DISPATCHED" -lt "$MAX_DISPATCH_PER_CYCLE" ]; do
 
   log "mcp-dispatch: running slot $SLOT_ID — ${SLOT_INSTR:0:80}"
 
-  # Launch mechatron-tools with the pre-claimed slot (skips mcp-claim, uses this slot ID).
+  # Launch salvage-tools with the pre-claimed slot (skips mcp-claim, uses this slot ID).
   # Run in background so we can dispatch multiple slots per cycle without blocking.
-  MECHATRON_FROM_POLLER=1 MECHATRON_SLOT_ID="$SLOT_ID" \
-    "$MECHATRON_TOOLS" "${SLOT_WS:-$HOME/clawd}" "$SLOT_INSTR" \
+  SALVAGE_FROM_POLLER=1 SALVAGE_SLOT_ID="$SLOT_ID" \
+    "$SALVAGE_TOOLS" "${SLOT_WS:-$HOME/clawd}" "$SLOT_INSTR" \
     >> "$LOG" 2>&1 &
 
   DISPATCHED=$((DISPATCHED + 1))

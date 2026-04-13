@@ -1,6 +1,6 @@
 #!/opt/homebrew/bin/node
 'use strict';
-// mechatron-watchdog — Health monitor for mechatron services
+// salvage-watchdog — Health monitor for salvage services
 // Runs every 5 minutes via LaunchAgent. Checks critical services, auto-restarts if needed,
 // alerts on Slack only when it can't self-heal.
 //
@@ -12,7 +12,7 @@ const path = require('path');
 const https = require('https');
 
 const HOME = process.env.HOME || '/Users/jayden.csai';
-const STATE_FILE = path.join(HOME, '.mechatron/watchdog-state.json');
+const STATE_FILE = path.join(HOME, '.salvage/watchdog-state.json');
 const LOG_FILE = path.join(HOME, 'claude-agent/logs/watchdog.log');
 const SLACK_TOKEN = process.env.SLACK_BOT_TOKEN || '';
 const JAYDEN_DM = 'D0AQW7VF4UA';

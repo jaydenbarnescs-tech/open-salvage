@@ -1,7 +1,7 @@
 #!/opt/homebrew/bin/node
 'use strict';
-// mechatron-memory-search — Hybrid search: vector similarity (70%) + FTS5 text (30%)
-// Usage: mechatron-memory-search <workspace> <query> [--max-results N] [--text-only]
+// salvage-memory-search — Hybrid search: vector similarity (70%) + FTS5 text (30%)
+// Usage: salvage-memory-search <workspace> <query> [--max-results N] [--text-only]
 // Matches OpenClaw's hybrid search weights: vectorWeight 0.7, textWeight 0.3
 
 const fs = require('fs');
@@ -12,7 +12,7 @@ const http = require('http');
 const HOME = process.env.HOME || '/Users/jayden.csai';
 const WORKSPACE = process.argv[2];
 const QUERY = process.argv[3];
-if (!WORKSPACE || !QUERY) { console.error('Usage: mechatron-memory-search <workspace> <query>'); process.exit(1); }
+if (!WORKSPACE || !QUERY) { console.error('Usage: salvage-memory-search <workspace> <query>'); process.exit(1); }
 
 let MAX_RESULTS = 6;
 let TEXT_ONLY = false;
@@ -164,13 +164,13 @@ function hybridRank(vectorResults, ftsResults) {
 
 async function main() {
   if (!fs.existsSync(DB_PATH)) {
-    console.log('No memory index found. Run: mechatron-memory-index ' + WORKSPACE);
+    console.log('No memory index found. Run: salvage-memory-index ' + WORKSPACE);
     process.exit(0);
   }
 
   // Auto-reindex before searching
   try {
-    execFileSync('/opt/homebrew/bin/node', [path.join(HOME, 'bin/mechatron-memory-index'), WORKSPACE], {
+    execFileSync('/opt/homebrew/bin/node', [path.join(HOME, 'bin/salvage-memory-index'), WORKSPACE], {
       encoding: 'utf-8', timeout: 30000, stdio: ['ignore', 'ignore', 'ignore'],
     });
   } catch {}

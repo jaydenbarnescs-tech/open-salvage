@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // ── Vanessa Worker ────────────────────────────────────────────────────────
 // Single-consumer task processor. MAX 1 instance running at any time.
-// Polls message_outbox, picks highest-priority job, runs mechatron,
+// Polls message_outbox, picks highest-priority job, runs salvage,
 // posts result to Slack. Then immediately picks the next job.
 //
 // Safeguards:
 //   - PID lockfile with stale detection (ESRCH + mtime)
-//   - Orphan kill on startup (pkill prior mechatron --task slack)
+//   - Orphan kill on startup (pkill prior salvage --task slack)
 //   - Stalled job recovery (claimed_at > 30 min ago → reset to pending)
 //   - Activity-based timeout: kill if no stream-json event or session file
 //     change for STALE_MS (2 min). Absolute max of MAX_MS (30 min).
@@ -15,7 +15,7 @@
 //   - Graceful SIGTERM handler (finish current job first)
 //
 // Timeout strategy (replaces old hard 300s wall):
-//   mechatron runs with --output-format stream-json. Every stream event
+//   salvage runs with --output-format stream-json. Every stream event
 //   (tool use, API response, etc.) resets lastActivity. Claude session
 //   JSONL file modifications also count as activity. If nothing moves for
 //   STALE_MS → truly stuck → SIGTERM. Long but valid jobs (10-20 min) run
@@ -36,7 +36,7 @@ const SLACK_BOT_TOKEN  = process.env.SLACK_BOT_TOKEN || "";
 const DB_PATH          = path.join(process.env.HOME, "clawd", "sessions", "agent.db");
 const LOG_FILE         = path.join(process.env.HOME, "claude-agent", "logs", "worker.log");
 const PID_FILE         = "/tmp/vanessa-worker.pid";
-const MECHATRON        = path.join(process.env.HOME, "bin", "mechatron");
+const SALVAGE        = path.join(process.env.HOME, "bin", "salvage");
 const WORKSPACE        = path.join(process.env.HOME, "clawd");
 
 const JAYDEN_DM_CHAN   = "D0AQW7VF4UA";
@@ -126,12 +126,12 @@ function releaseLock() {
   } catch {}
 }
 
-// ── Kill orphaned mechatron processes from a previous worker run ──────────
+// ── Kill orphaned salvage processes from a previous worker run ──────────
 function killOrphans() {
   try {
     const { execFileSync } = require("child_process");
-    execFileSync("pkill", ["-f", "mechatron --task slack"], { stdio: "ignore" });
-    log("info", "killed orphaned mechatron processes");
+    execFileSync("pkill", ["-f", "salvage --task slack"], { stdio: "ignore" });
+    log("info", "killed orphaned salvage processes");
   } catch {} // pkill returns exit 1 if nothing found — that's fine
 }
 
@@ -258,15 +258,15 @@ const API_ERROR_PATTERNS = [
   /permission_error/i,
 ];
 
-// ── Run mechatron with activity-based timeout ─────────────────────────────
+// ── Run salvage with activity-based timeout ─────────────────────────────
 // Uses --output-format stream-json so we receive events in real-time.
 // Any stream-json event or JSONL session file change resets the activity
 // timer. We kill only if STALE_MS passes with NO activity (truly stuck).
 // Absolute maximum is MAX_MS regardless of activity.
 // Resolves as soon as we see {"type":"result","subtype":"success"} — we kill
-// mechatron immediately and return the text. No double-posting: the prompt
+// salvage immediately and return the text. No double-posting: the prompt
 // tells Vanessa not to post via tools; the worker handles all Slack posting.
-function runMechatron(prompt, sessionKey, model) {
+function runSalvage(prompt, sessionKey, model) {
   return new Promise((resolve, reject) => {
     const args = [
       "--workspace", WORKSPACE,
@@ -287,7 +287,7 @@ function runMechatron(prompt, sessionKey, model) {
       PATH: `${process.env.HOME}/bin:/opt/homebrew/opt/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`,
     };
 
-    const child = spawn(MECHATRON, args, {
+    const child = spawn(SALVAGE, args, {
       stdio: ["ignore", "pipe", "pipe"],
       env,
     });
@@ -327,17 +327,17 @@ function runMechatron(prompt, sessionKey, model) {
       if (settled) { clearInterval(staleChecker); return; }
       const idleMs = Date.now() - lastActivity;
       if (idleMs > STALE_MS) {
-        log("warn", "mechatron stale — no activity", { pid: child.pid, idleSec: Math.round(idleMs / 1000) });
+        log("warn", "salvage stale — no activity", { pid: child.pid, idleSec: Math.round(idleMs / 1000) });
         killChild();
-        settle(new Error(`Mechatron stale: no activity for ${STALE_MS / 1000}s`));
+        settle(new Error(`Salvage stale: no activity for ${STALE_MS / 1000}s`));
       }
     }, 15_000);
 
     // ── Absolute maximum ──────────────────────────────────────────────────
     const absoluteTimer = setTimeout(() => {
-      log("warn", "mechatron absolute timeout", { pid: child.pid, maxMin: MAX_MS / 60_000 });
+      log("warn", "salvage absolute timeout", { pid: child.pid, maxMin: MAX_MS / 60_000 });
       killChild();
-      settle(new Error(`Mechatron exceeded absolute max (${MAX_MS / 60_000} min)`));
+      settle(new Error(`Salvage exceeded absolute max (${MAX_MS / 60_000} min)`));
     }, MAX_MS);
 
     // ── Parse stream-json events from stdout ──────────────────────────────
@@ -369,11 +369,11 @@ function runMechatron(prompt, sessionKey, model) {
               }
               resultText = text;
               // Layer 1 fix: do NOT kill the child process here.
-              // Mechatron calls updateSessionState() at the end of its own main().
+              // Salvage calls updateSessionState() at the end of its own main().
               // If we kill it now, updateSessionState never runs, state.json never
               // updates, and --continue is never passed on the next invocation.
               // Instead: resolve immediately so Slack posting can begin, but let
-              // mechatron exit naturally. The staleChecker / absoluteTimer will
+              // salvage exit naturally. The staleChecker / absoluteTimer will
               // kill it if it somehow hangs after this point.
               settle(text);
             } else {
@@ -381,18 +381,18 @@ function runMechatron(prompt, sessionKey, model) {
               // If Claude managed to write partial text, surface it rather than failing.
               if (text && text.trim()) {
                 resultText = text;
-                // For error subtypes we still want to let mechatron clean up
+                // For error subtypes we still want to let salvage clean up
                 // naturally, but we do kill to avoid lingering on broken state.
                 killChild();
                 settle(text);
               } else {
                 killChild();
-                settle(new Error(`Mechatron result error: ${event.subtype}`));
+                settle(new Error(`Salvage result error: ${event.subtype}`));
               }
             }
           }
         } catch {
-          // Non-JSON line (mechatron startup logs, etc.) — ignore
+          // Non-JSON line (salvage startup logs, etc.) — ignore
         }
       }
     });
@@ -415,9 +415,9 @@ function runMechatron(prompt, sessionKey, model) {
       if (resultText !== null) {
         settle(resultText); // safety net
       } else if (code !== 0) {
-        settle(new Error(`Mechatron exited code ${code}: ${(stderr || "").slice(0, 300)}`));
+        settle(new Error(`Salvage exited code ${code}: ${(stderr || "").slice(0, 300)}`));
       } else {
-        settle(new Error("Mechatron exited without producing a result"));
+        settle(new Error("Salvage exited without producing a result"));
       }
     });
 
@@ -687,8 +687,8 @@ async function processJob(job) {
     "Do NOT post messages to Slack or DM via tools or sub-agents. " +
     "Write your complete response as plain text — the worker will post it to Slack for you. " +
     "You MAY use bash tools to: read files, run vanessa-memory-read, run vanessa-memory-update, " +
-    "search memory (mechatron-memory-search), read Slack history, query the DB. " +
-    "You may NOT use mechatron-tools to send Slack messages. " +
+    "search memory (salvage-memory-search), read Slack history, query the DB. " +
+    "You may NOT use salvage-tools to send Slack messages. " +
     "Layer 3 rule: Execute ALL required tool calls (memory writes, reads, actions) FIRST. " +
     "Only after all actions are complete, write your final plain-text response summarizing what was done. " +
     "Do not write a response before running tools — act first, then speak.\n\n";
@@ -705,7 +705,7 @@ async function processJob(job) {
   }
 
   try {
-    const response = await runMechatron(prompt, sessionKey, model);
+    const response = await runSalvage(prompt, sessionKey, model);
 
     // 👀 → ✅
     if (reactionTs) {
