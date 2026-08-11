@@ -6,7 +6,7 @@ mgc-pass-proxy（Oracle Cloud VM上）を通じてアクセスできる全ツー
 
 ## プロキシ情報
 - **URL:** `https://mgc-pass-proxy.duckdns.org`
-- **IP:** `64.110.107.203`（/etc/hostsで名前解決）
+- **IP:** `141.147.159.169`（2026-06-05 現在。DuckDNS もこの IP を向く）
 - **MCP接続:** `mcp-remote` 経由で `https://mgc-pass-proxy.duckdns.org/mcp`
 
 ---
@@ -186,7 +186,7 @@ LINE公式アカウントからメッセージ送信。
 - 429エラーが出たら少し待ってリトライ
 
 ### ホスト解決
-Jaydenのネットワークでは DuckDNS が解決しないため、`/etc/hosts` に手動エントリあり：
+Jaydenのネットワークで DuckDNS が解決しない場合だけ、`/etc/hosts` に手動エントリを置く：
 ```
-64.110.107.203 mgc-pass-proxy.duckdns.org
+141.147.159.169 mgc-pass-proxy.duckdns.org
 ```

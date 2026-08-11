@@ -15,8 +15,20 @@ DB_CMD="$HOME/bin/salvage-db"
 SALVAGE_TOOLS="$HOME/bin/salvage-tools"
 LOG="$HOME/claude-agent/logs/task-poller.log"
 SIGNAL_FILE="$HOME/.salvage/dispatch-signal"
+CONFIG_FILE="$HOME/clawd/config/salvage-config.json"
+
+# Read model from config, fallback to claude-sonnet-4-6
+SALVAGE_MODEL=$(/opt/homebrew/bin/node -e "try{const c=JSON.parse(require('fs').readFileSync('$CONFIG_FILE','utf-8'));console.log(c.model||'claude-sonnet-4-6')}catch{console.log('claude-sonnet-4-6')}" 2>/dev/null)
+IS_CLAUDE_MODEL=$(/opt/homebrew/bin/node -e "console.log(/^claude[-\s]|^(sonnet|opus|haiku)/i.test('$SALVAGE_MODEL')?'yes':'no')" 2>/dev/null)
+POLLER_ENABLED=$(/opt/homebrew/bin/node -e "try{const c=JSON.parse(require('fs').readFileSync('$CONFIG_FILE','utf-8'));console.log(c.backgroundTasks?.enabled===true?'yes':'no')}catch{console.log('no')}" 2>/dev/null)
+ALLOW_LOCAL_MODELS=$(/opt/homebrew/bin/node -e "try{const c=JSON.parse(require('fs').readFileSync('$CONFIG_FILE','utf-8'));console.log(c.backgroundTasks?.allowLocalModels===true?'yes':'no')}catch{console.log('no')}" 2>/dev/null)
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG"; }
+
+if [ "${SALVAGE_POLLER_ENABLED:-}" != "1" ] && [ "$POLLER_ENABLED" != "yes" ]; then
+  log "disabled by config; set backgroundTasks.enabled=true or SALVAGE_POLLER_ENABLED=1 to run"
+  exit 0
+fi
 
 # ── 1. Recover stalled background tasks (expired visibility timeout) ──────
 RECOVERED=$("$DB_CMD" recover 2>/dev/null || echo "")
@@ -24,30 +36,39 @@ if [ -n "$RECOVERED" ]; then
   log "RECOVERED: $RECOVERED"
 fi
 
-# ── 2. Check for pending background tasks ─────────────────────────────────
-PENDING=$("$DB_CMD" task list pending 2>/dev/null || echo "[]")
-TASK_COUNT=$(echo "$PENDING" | /opt/homebrew/bin/node -e "try{const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'));console.log(d.length)}catch{console.log(0)}" 2>/dev/null)
+# ── 2. Claim and run pending background tasks ──────────────────────────────
+# Always claim/update tasks; otherwise a completed task can stay pending and
+# rerun forever every 60 seconds.
+MAX_TASKS_PER_CYCLE=2
+CLAIMED_TASKS=0
 
-if [ "${TASK_COUNT:-0}" != "0" ] && [ -n "$TASK_COUNT" ]; then
-  log "Found $TASK_COUNT pending tasks"
+while [ "$CLAIMED_TASKS" -lt "$MAX_TASKS_PER_CYCLE" ]; do
+  CLAIMED=$("$DB_CMD" task claim "salvage-task-poller" "'agent_task'" 2>/dev/null || echo "[]")
+  TASK_COUNT=$(echo "$CLAIMED" | /opt/homebrew/bin/node -e "try{const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'));console.log(Array.isArray(d)?d.length:0)}catch{console.log(0)}" 2>/dev/null)
+  [ "${TASK_COUNT:-0}" = "0" ] && break
 
-  # Process up to 2 tasks per poll cycle (prevent overload)
-  echo "$PENDING" | /opt/homebrew/bin/node -e "
-const tasks = JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'));
-tasks.slice(0, 2).forEach(t => console.log(JSON.stringify(t)));
-" 2>/dev/null | while IFS= read -r TASK_JSON; do
-    TASK_ID=$(echo "$TASK_JSON" | /opt/homebrew/bin/node -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8')).id)" 2>/dev/null)
-    TASK_TYPE=$(echo "$TASK_JSON" | /opt/homebrew/bin/node -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8')).type)" 2>/dev/null)
-    TASK_PAYLOAD=$(echo "$TASK_JSON" | /opt/homebrew/bin/node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'));console.log(d.payload_preview||'{}')" 2>/dev/null)
+  TASK_JSON=$(echo "$CLAIMED" | /opt/homebrew/bin/node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'));console.log(JSON.stringify(d[0]||{}))" 2>/dev/null)
+  TASK_ID=$(echo "$TASK_JSON" | /opt/homebrew/bin/node -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8')).id||'')" 2>/dev/null)
+  TASK_TYPE=$(echo "$TASK_JSON" | /opt/homebrew/bin/node -e "console.log(JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8')).type||'agent_task')" 2>/dev/null)
+  TASK_PAYLOAD=$(echo "$TASK_JSON" | /opt/homebrew/bin/node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'));console.log(d.payload||'{}')" 2>/dev/null)
 
-    if [ -z "$TASK_ID" ]; then continue; fi
+  [ -z "$TASK_ID" ] && break
 
-    log "Processing task $TASK_ID (type=$TASK_TYPE)"
+  log "Processing task $TASK_ID (type=$TASK_TYPE)"
+  "$DB_CMD" task update "$TASK_ID" running 2>/dev/null || true
 
-    WORKSPACE="$HOME/clawd"
+  if [ "$IS_CLAUDE_MODEL" != "yes" ] && [ "${SALVAGE_ALLOW_LOCAL_MODEL_IN_POLLER:-}" != "1" ] && [ "$ALLOW_LOCAL_MODELS" != "yes" ]; then
+    log "Task $TASK_ID refused: local model $SALVAGE_MODEL is disabled for background poller"
+    "$DB_CMD" task update "$TASK_ID" failed "" "local model $SALVAGE_MODEL disabled for background poller"
+    CLAIMED_TASKS=$((CLAIMED_TASKS + 1))
+    continue
+  fi
 
-    PROMPT=$(echo "$TASK_PAYLOAD" | /opt/homebrew/bin/node -e "try{const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'));console.log(d.description||d.instruction||d.prompt||JSON.stringify(d))}catch(e){console.log('Process this task')}" 2>/dev/null)
+  WORKSPACE="$HOME/clawd"
+  PROMPT=$(echo "$TASK_PAYLOAD" | /opt/homebrew/bin/node -e "try{const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8'));console.log(d.description||d.instruction||d.prompt||JSON.stringify(d))}catch(e){console.log('Process this task')}" 2>/dev/null)
 
+  set +e
+  if [ "$IS_CLAUDE_MODEL" = "yes" ]; then
     "$HOME/bin/salvage" \
       --workspace "$WORKSPACE" \
       --task "$TASK_TYPE" \
@@ -55,15 +76,32 @@ tasks.slice(0, 2).forEach(t => console.log(JSON.stringify(t)));
       --fresh \
       --no-mcp \
       -p "$PROMPT" \
-      --model claude-sonnet-4-6 \
+      --model "$SALVAGE_MODEL" \
       --max-turns 15 \
       --output-format text \
       --dangerously-skip-permissions \
-      >> "$LOG" 2>&1 || log "Task $TASK_ID failed (exit $?)"
+      >> "$LOG" 2>&1
+  else
+    SALVAGE_FROM_POLLER=1 OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-5m}" \
+      "$HOME/bin/salvage-llm" \
+      --model "$SALVAGE_MODEL" \
+      --workspace "$WORKSPACE" \
+      -p "$PROMPT" \
+      >> "$LOG" 2>&1
+  fi
+  STATUS=$?
+  set -e
 
+  if [ "$STATUS" -eq 0 ]; then
+    "$DB_CMD" task update "$TASK_ID" done "completed by salvage-task-poller" 2>/dev/null || true
     log "Task $TASK_ID processing complete"
-  done
-fi
+  else
+    "$DB_CMD" task update "$TASK_ID" failed "" "exit $STATUS" 2>/dev/null || true
+    log "Task $TASK_ID failed (exit $STATUS)"
+  fi
+
+  CLAIMED_TASKS=$((CLAIMED_TASKS + 1))
+done
 
 # ── 3. Dispatch queued MCP tool calls (two-tier dispatch) ─────────────────
 # Recover running slots whose process has died (SIGKILL bypass, crash, etc.)

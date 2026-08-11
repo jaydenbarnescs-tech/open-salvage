@@ -27,11 +27,22 @@ const path = require('path');
 const fs = require('fs');
 
 const HOME = process.env.HOME || '/Users/jayden.csai';
-const SALVAGE    = path.join(HOME, 'bin/salvage');
+const SALVAGE      = path.join(HOME, 'bin/salvage');
+const SALVAGE_LLM  = path.join(HOME, 'bin/salvage-llm');
 const DB_CMD       = path.join(HOME, 'bin/salvage-db');
 const MEM0_PYTHON  = path.join(HOME, 'claude-agent/mem0-env/bin/python');
 const MEM0_DIR     = path.join(HOME, 'claude-agent/mem0');
 const SIGNAL_FILE  = path.join(HOME, '.salvage/dispatch-signal');
+const CONFIG_FILE  = path.join(HOME, 'clawd/config/salvage-config.json');
+
+function getModelFromConfig() {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+    return cfg.model || 'claude-sonnet-4-6';
+  } catch { return 'claude-sonnet-4-6'; }
+}
+const SALVAGE_MODEL = getModelFromConfig();
+const IS_CLAUDE_MODEL = /^claude[-\s]|^(sonnet|opus|haiku)/i.test(SALVAGE_MODEL);
 
 function getStandingInstructions() {
   try {
@@ -150,24 +161,34 @@ Just execute the tool and return the result. Be brief.
 
 Task: ${INSTRUCTION}`;
 
-const args = [
-  '--workspace', path.resolve(WORKSPACE),
-  '--task', 'general',
-  '--fresh',
-  '--minimal',
-  '--no-live-state',
-  '--no-memory',
-  '-p', TOOL_INSTRUCTION,
-  '--model', 'claude-sonnet-4-6',
-  '--max-turns', '10',
-  '--output-format', 'text',
-  '--dangerously-skip-permissions',
-];
+let bin, args;
+if (IS_CLAUDE_MODEL) {
+  bin = SALVAGE;
+  args = [
+    '--workspace', path.resolve(WORKSPACE),
+    '--task', 'general',
+    '--fresh',
+    '--minimal',
+    '--no-live-state',
+    '--no-memory',
+    '-p', TOOL_INSTRUCTION,
+    '--model', SALVAGE_MODEL,
+    '--max-turns', '10',
+    '--output-format', 'text',
+    '--dangerously-skip-permissions',
+  ];
+  // Remove --no-mcp for this call (we WANT MCP here)
+  // salvage will load MCP because --no-mcp is not in args and --minimal doesn't skip MCP
+} else {
+  bin = SALVAGE_LLM;
+  args = [
+    '--model', SALVAGE_MODEL,
+    '--workspace', path.resolve(WORKSPACE),
+    '-p', TOOL_INSTRUCTION,
+  ];
+}
 
-// Remove --no-mcp for this call (we WANT MCP here)
-// salvage will load MCP because --no-mcp is not in args and --minimal doesn't skip MCP
-
-const child = spawn(SALVAGE, args, {
+const child = spawn(bin, args, {
   stdio: ['ignore', 'pipe', 'pipe'],
   env: {
     ...process.env,

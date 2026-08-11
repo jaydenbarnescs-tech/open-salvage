@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="/Users/jayden.csai/clawd"
+REGISTRY="$ROOT/config/agents/registry.yaml"
+
+if [ ! -f "$REGISTRY" ]; then
+  echo "Missing registry: $REGISTRY" >&2
+  exit 1
+fi
+
+echo "Registry present: $REGISTRY"
+echo "Sync implementation scaffolding only for now."
+echo "Next steps:"
+echo "- validate registry structure"
+echo "- generate/update SYSTEMS.md and TOOLS.md from registry"
+echo "- manage Claude/Codex projection targets with backup-first behavior"

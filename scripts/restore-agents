@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Not implemented yet."
+echo "Use the corresponding snapshot in /Users/jayden.csai/clawd/archives and restore deliberately."

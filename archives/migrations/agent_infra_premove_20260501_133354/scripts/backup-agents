@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="/Users/jayden.csai/clawd"
+ARCHIVE_ROOT="$ROOT/archives"
+MANIFEST_ROOT="$ARCHIVE_ROOT/manifests"
+STAMP="$(date +%Y%m%d_%H%M%S)"
+SNAPSHOT_DIR="$ARCHIVE_ROOT/snapshot_$STAMP"
+MANIFEST_PATH="$MANIFEST_ROOT/backup_$STAMP.txt"
+
+mkdir -p "$SNAPSHOT_DIR" "$MANIFEST_ROOT"
+
+TARGETS=(
+  "/Users/jayden.csai/.claude"
+  "/Users/jayden.csai/.claude.json"
+  "/Users/jayden.csai/.codex"
+  "/Users/jayden.csai/.salvage"
+  "/Users/jayden.csai/bin"
+  "/Users/jayden.csai/clawd"
+)
+
+printf 'backup_time=%s\n' "$STAMP" > "$MANIFEST_PATH"
+printf 'snapshot_dir=%s\n' "$SNAPSHOT_DIR" >> "$MANIFEST_PATH"
+
+for target in "${TARGETS[@]}"; do
+  if [ -e "$target" ]; then
+    printf 'included=%s\n' "$target" >> "$MANIFEST_PATH"
+    cp -R "$target" "$SNAPSHOT_DIR"/
+  else
+    printf 'missing=%s\n' "$target" >> "$MANIFEST_PATH"
+  fi
+done
+
+printf 'Backup created:\n%s\nManifest:\n%s\n' "$SNAPSHOT_DIR" "$MANIFEST_PATH"

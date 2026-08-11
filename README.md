@@ -1,5 +1,9 @@
 # openSalvage
 
+> ⛔ **RETIRED — 2026-07-19.** This agent system (salvage / mechatron / openSalvage)
+> has been shut down and disabled; it no longer runs on any schedule. See
+> [`RETIRED.md`](./RETIRED.md) for what was disabled and how to revive it.
+
 > The production agent framework for Claude Code CLI — built from the inside.
 
 ---

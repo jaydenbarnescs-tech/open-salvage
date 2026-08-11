@@ -31,3 +31,4 @@ This file is injected into every prompt. It persists across session resets, dail
 <!-- Important facts about the current state of the system that should persist. -->
 - [2026-04-13] vanessa-worker.js updated: session persistence fixed (Layer 1), core memory system added (Layer 2), action-response ordering fixed (Layer 3), history window expanded to 20 messages / 1000 chars (Layer 4)
 - [2026-04-12] vanessa-worker.js updated 2026-04-13: session persistence fixed (kill bug), core memory system added, action-response ordering fixed, history window expanded to 20 messages
+- [2026-05-15] Jayden currently lives about a 10-minute walk from Tsuruhashi Station. Use Tsuruhashi as the home-area route base for local Osaka errands unless he says otherwise.

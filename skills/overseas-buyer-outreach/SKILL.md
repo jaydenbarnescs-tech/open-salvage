@@ -134,6 +134,26 @@ For each company website, crawl `/contact`, `/about`, `/team`:
 
 Target: **8 contactable companies** per run.
 
+### Step 3.5 — Research Each Company with Google AI Mode
+
+Before writing the email, use `search_ai` (google-ai-search MCP) to research each target:
+
+```
+search_ai("site:[company-domain] OR \"[Company Name]\" products sourcing Japan")
+```
+
+Extract from results:
+- **What they actually sell** (specific product names/brands, not just category)
+- **Markets they serve** (US-West, UK, DACH, etc.)
+- **Any Japan connection** (existing Japan lines, trade show presence, supplier mentions)
+- **Company size signals** (staff count, warehouse, store count)
+
+Use these specifics in the email hook line. If `search_ai` returns nothing useful in 15s, fall back to website crawl only.
+
+**Tip:** One `search_ai` query per company is enough — don't over-research. The goal is one concrete detail to open with.
+
+---
+
 ### Step 4 — Generate Personalized Email
 
 **Hard rules:**

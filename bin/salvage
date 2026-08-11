@@ -35,6 +35,7 @@ const VAULT = path.join(HOME, 'Library/Mobile Documents/iCloud~md~obsidian/Docum
 const LOG_DIR = path.join(HOME, 'claude-agent/logs');
 const MEM0_PYTHON = path.join(HOME, 'claude-agent/mem0-env/bin/python');
 const MEM0_DIR    = path.join(HOME, 'claude-agent/mem0');
+const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || '5m';
 
 // OpenClaw bootstrap allowlist
 const VALID_BOOTSTRAP_NAMES = new Set([
@@ -641,6 +642,7 @@ let minimal = false;
 let fresh = false;
 let dryRun = false;
 let taskId = null;  // Links execution to a SQLite task
+let threadTs = null; // Slack thread_ts for session keying
 const passThroughArgs = [];
 
 for (let i = 0; i < args.length; i++) {
@@ -677,6 +679,9 @@ for (let i = 0; i < args.length; i++) {
       break;
     case '--task-id':
       taskId = args[++i];
+      break;
+    case '--thread-ts':
+      threadTs = args[++i] || null;
       break;
     default:
       passThroughArgs.push(args[i]);
@@ -1107,6 +1112,7 @@ fs.writeFileSync(tmpFile, systemPromptWithRecovery, 'utf-8');
 
 function cleanup() {
   try { fs.unlinkSync(tmpFile); } catch {}
+  if (activeMcpManager) { try { activeMcpManager.cleanup(); } catch {} activeMcpManager = null; }
 }
 
 // ── 8. Build Claude CLI args ─────────────────────────────────────────────
@@ -1164,8 +1170,1058 @@ function buildEnv() {
   return env;
 }
 
-// ── 10. Call Claude ──────────────────────────────────────────────────────
+// ── 10. Call Claude / Local LLM ──────────────────────────────────────────
 let activeClaudeChild = null; // tracked for SIGTERM propagation
+let activeMcpManager = null;  // tracked for cleanup on exit
+
+// ── MCPClientManager ──────────────────────────────────────────────────────
+// Connects to MCP servers via JSON-RPC 2.0 over stdio (Content-Length framing).
+// Follows the MCPManager pattern from ollama-mcp-bridge.
+// Pre-warmed at process start so cold-start latency (npx -y) doesn't block inference.
+class MCPClientManager {
+  constructor() {
+    this.servers = new Map(); // name → { proc, buf, pending, nextId }
+    this.tools = [];          // OpenAI function format with _server/_toolName metadata
+  }
+
+  async load(configPath) {
+    let config;
+    try { config = JSON.parse(fs.readFileSync(configPath, 'utf-8')); }
+    catch (e) { log(`MCPClientManager: cannot load ${configPath}: ${e.message}`); return; }
+
+    // Connect servers sequentially to preserve config order in this.tools.
+    // Promise.allSettled (parallel) caused non-deterministic tool ordering because
+    // faster-starting servers (direct node script) would beat slower ones (npx cold start).
+    const servers = config.mcpServers || {};
+    for (const [name, cfg] of Object.entries(servers)) {
+      await this._connectServer(name, cfg).catch(e =>
+        log(`MCPClientManager: ${name} failed to connect: ${e.message}`)
+      );
+    }
+    log(`MCPClientManager: ready — ${this.tools.length} tools from ${this.servers.size} servers`);
+  }
+
+  async _connectServer(name, cfg) {
+    if (!cfg.command) return;
+    const serverEnv = {
+      PATH: '/opt/homebrew/opt/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
+      HOME,
+      ...process.env,
+      ...(cfg.env || {}),
+    };
+    const proc = spawn(cfg.command, cfg.args || [], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: serverEnv,
+    });
+
+    const state = { proc, buf: '', pending: new Map(), nextId: 1 };
+    this.servers.set(name, state);
+
+    proc.stdout.on('data', chunk => {
+      state.buf += chunk.toString();
+      this._drainLines(name, state);
+    });
+    proc.stderr.on('data', chunk =>
+      log(`MCP[${name}] stderr: ${chunk.toString().trim().slice(0, 200)}`)
+    );
+    proc.on('error', e => { log(`MCP[${name}] error: ${e.message}`); this.servers.delete(name); });
+    proc.on('exit', code => { log(`MCP[${name}] exited: ${code}`); this.servers.delete(name); });
+
+    // MCP handshake (sequence from ollama-mcp-bridge/mcp_manager.py)
+    await this._rpc(name, 'initialize', {
+      protocolVersion: '2024-11-05',
+      clientInfo: { name: 'salvage', version: '1.0' },
+      capabilities: {},
+    });
+    this._notify(name, 'notifications/initialized', {});
+
+    // Discover tools — stored as {server}.{tool} (ollama-mcp-bridge naming convention)
+    const result = await this._rpc(name, 'tools/list', {});
+    for (const tool of (result.tools || [])) {
+      this.tools.push({
+        type: 'function',
+        function: {
+          name: `${name}.${tool.name}`,
+          description: tool.description || '',
+          parameters: tool.inputSchema || { type: 'object', properties: {} },
+        },
+        _server: name,
+        _toolName: tool.name,
+      });
+    }
+    log(`MCP[${name}]: connected, ${(result.tools || []).length} tools`);
+  }
+
+  // Parse newline-delimited JSON messages (standard MCP stdio transport)
+  // Each message is a single JSON object on its own line.
+  _drainLines(name, state) {
+    const lines = state.buf.split('\n');
+    // Keep the last (potentially incomplete) line in the buffer
+    state.buf = lines.pop();
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let msg;
+      try { msg = JSON.parse(trimmed); } catch { continue; }
+      if (msg.id != null && state.pending.has(msg.id)) {
+        const { resolve, reject } = state.pending.get(msg.id);
+        state.pending.delete(msg.id);
+        if (msg.error) reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+        else resolve(msg.result);
+      }
+    }
+  }
+
+  _write(name, msg) {
+    const state = this.servers.get(name);
+    if (!state) throw new Error(`MCP server ${name} not connected`);
+    state.proc.stdin.write(JSON.stringify(msg) + '\n');
+  }
+
+  _rpc(name, method, params, timeoutMs = 30000) {
+    const state = this.servers.get(name);
+    if (!state) return Promise.reject(new Error(`MCP server ${name} not connected`));
+    const id = state.nextId++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        state.pending.delete(id);
+        reject(new Error(`MCP RPC timeout: ${method} on ${name}`));
+      }, timeoutMs);
+      state.pending.set(id, {
+        resolve: v => { clearTimeout(timer); resolve(v); },
+        reject: e => { clearTimeout(timer); reject(e); },
+      });
+      this._write(name, { jsonrpc: '2.0', id, method, params });
+    });
+  }
+
+  _notify(name, method, params) {
+    try { this._write(name, { jsonrpc: '2.0', method, params }); } catch {}
+  }
+
+  async callTool(fullName, args) {
+    // memory_search / salvage_memory_search: direct binary call — fast, no MCP overhead
+    // Accept both names: 'memory_search' (internal) and 'salvage_memory_search' (SOUL.md name)
+    if (fullName === 'memory_search' || fullName === 'salvage_memory_search') {
+      try {
+        return execFileSync(
+          path.join(HOME, 'bin/salvage-memory-search'),
+          [WORKSPACE, args.query || ''],
+          { timeout: 30000, encoding: 'utf-8', env: process.env }
+        ).trim() || '(no results)';
+      } catch (e) { return `memory_search error: ${e.message}`; }
+    }
+
+    let toolDef = this.tools.find(t => t.function.name === fullName);
+    if (!toolDef) {
+      // Fuzzy fallback: Gemma 4 hallucinates tool names (e.g. "google:ds_engine/file_read").
+      // Map intent-signals in the hallucinated name to real filesystem tools.
+      // This is intentional leniency — a wrong name with correct args is better than an error.
+      const lower = fullName.toLowerCase();
+      let fallbackName;
+      if (lower.includes('write') || lower.includes('save') || lower.includes('put') || lower.includes('creat')) {
+        fallbackName = 'filesystem.write_file';
+      } else if (lower.includes('edit') || lower.includes('patch') || lower.includes('modif') || lower.includes('replac')) {
+        fallbackName = 'filesystem.edit_file';
+      } else if (lower.includes('list') || lower.includes('dir') || lower.includes('ls')) {
+        fallbackName = 'filesystem.list_directory';
+      } else if (lower.includes('read') || lower.includes('load') || lower.includes('get') || lower.includes('open') || lower.includes('file')) {
+        fallbackName = 'filesystem.read_file';
+      } else if (lower.includes('search') || lower.includes('find') || lower.includes('query')) {
+        fallbackName = 'google-ai-search.search_ai';
+      }
+      if (fallbackName) {
+        toolDef = this.tools.find(t => t.function.name === fallbackName);
+        if (toolDef) log(`callTool: fuzzy-mapped "${fullName}" → "${fallbackName}"`);
+      }
+    }
+    if (!toolDef) return `Unknown tool: ${fullName}`;
+
+    try {
+      const result = await this._rpc(toolDef._server, 'tools/call', {
+        name: toolDef._toolName,
+        arguments: args,
+      }, 60000);
+      const content = result?.content;
+      if (!content?.length) return '(tool returned no content)';
+      const first = content[0];
+      if (first.text) return first.text;
+      if (first.data) return typeof first.data === 'string' ? first.data : JSON.stringify(first.data);
+      return JSON.stringify(first);
+    } catch (e) { return `Tool error (${fullName}): ${e.message}`; }
+  }
+
+  cleanup() {
+    for (const [, state] of this.servers) {
+      try { state.proc.kill('SIGTERM'); } catch {}
+    }
+    this.servers.clear();
+    this.tools = [];
+  }
+}
+
+// ── detectBackend ─────────────────────────────────────────────────────────
+// CLI-based detection — no port guessing, no false positives from unrelated servers.
+//
+// mlx-lm:  pgrep -af mlx_lm.server  → find process, parse --port from args
+//           then canary HTTP tool call to verify parser works for this model
+// Ollama:  execFileSync('ollama', ['show', model]) → confirms model installed + daemon alive
+//
+// Source for canary approach: mlx-lm Issue #1096 — Gemma 4 <|tool_call> token format
+// not handled by _infer_tool_parser() → tool_calls silently null regardless of model quality.
+// Gemma 4 in MLX_BROKEN_TOOL_FAMILIES skips directly to Ollama without canary.
+const MLX_BROKEN_TOOL_FAMILIES = ['gemma4', 'gemma-4', 'gemma 4'];
+
+async function detectBackend(model) {
+  const http = require('http');
+  const { execSync } = require('child_process');
+
+  // Find mlx_lm.server process and extract its --port arg
+  function findMlxServer() {
+    try {
+      // Use ps + grep instead of pgrep -af to avoid self-match false positives
+      const out = execSync('ps aux | grep "[m]lx_lm.server"', { encoding: 'utf-8', timeout: 2000, shell: true }).trim();
+      if (!out) return null;
+      const portMatch = out.match(/--port[=\s]+(\d+)/);
+      const port = portMatch ? parseInt(portMatch[1]) : 8080; // default mlx-lm port
+      log(`detectBackend: mlx_lm.server process found on port ${port}`);
+      return port;
+    } catch { return null; }
+  }
+
+  // Canary: send a minimal tool-call request, check if tool_calls comes back populated.
+  // Only run this after confirming the right mlx-lm process exists.
+  async function canaryToolCall(port, model) {
+    const body = JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: 'Call get_time.' }],
+      tools: [{ type: 'function', function: {
+        name: 'get_time', description: 'Get current time',
+        parameters: { type: 'object', properties: {} },
+      }}],
+      stream: false, max_tokens: 50,
+    });
+    return new Promise(resolve => {
+      const req = http.request({
+        hostname: '127.0.0.1', port, path: '/v1/chat/completions', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      }, res => {
+        let data = '';
+        res.on('data', c => data += c);
+        res.on('end', () => {
+          try {
+            const p = JSON.parse(data);
+            const calls = p?.choices?.[0]?.message?.tool_calls;
+            resolve(Array.isArray(calls) && calls.length > 0);
+          } catch { resolve(false); }
+        });
+      });
+      req.setTimeout(8000, () => { req.destroy(); resolve(false); });
+      req.on('error', () => resolve(false));
+      req.write(body); req.end();
+    });
+  }
+
+  // Check Ollama has this model installed and daemon is alive
+  function checkOllama(model) {
+    try {
+      execSync(`ollama show ${model}`, {
+        encoding: 'utf-8', timeout: 5000,
+        env: { ...process.env, PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin' },
+      });
+      return true;
+    } catch { return false; }
+  }
+
+  const modelLower = (model || '').toLowerCase();
+  const mlxBroken = MLX_BROKEN_TOOL_FAMILIES.some(f => modelLower.includes(f));
+
+  // 1. mlx-lm — process-based detection, not port-based
+  const mlxPort = findMlxServer();
+  if (mlxPort !== null) {
+    if (mlxBroken) {
+      log(`detectBackend: mlx-lm running but ${model} in broken tool family list — falling through`);
+    } else {
+      const ok = await canaryToolCall(mlxPort, model);
+      if (ok) {
+        log(`detectBackend: mlx-lm port ${mlxPort} selected (canary verified)`);
+        return { type: 'mlx', port: mlxPort };
+      }
+      log(`detectBackend: mlx-lm running but canary failed for ${model} — falling through`);
+    }
+  }
+
+  // 2. Ollama — CLI check confirms model exists and daemon is responsive
+  if (checkOllama(model)) {
+    log('detectBackend: Ollama selected (model confirmed via ollama show)');
+    return { type: 'ollama', port: 11434 };
+  }
+
+  // 3. OpenAI-compatible external API — Qwen, Together, Groq, Fireworks, etc.
+  // Config sources (checked in order):
+  //   a) workspace salvage.json → { "apiEndpoint": "...", "apiKey": "..." }
+  //   b) ~/.salvage/config.json (same keys)
+  //   c) env: OPENAI_BASE_URL + OPENAI_API_KEY (OpenAI-standard convention)
+  //   d) env: TOGETHER_API_KEY → Together AI endpoint
+  //   e) env: GROQ_API_KEY → Groq endpoint
+  const apiEndpoint =
+    config.apiEndpoint ||
+    process.env.OPENAI_BASE_URL ||
+    (process.env.TOGETHER_API_KEY ? 'https://api.together.xyz/v1' : null) ||
+    (process.env.GROQ_API_KEY ? 'https://api.groq.com/openai/v1' : null);
+  const apiKey =
+    config.apiKey ||
+    process.env.OPENAI_API_KEY ||
+    process.env.TOGETHER_API_KEY ||
+    process.env.GROQ_API_KEY;
+
+  if (apiEndpoint && apiKey) {
+    log(`detectBackend: openai_compat selected — endpoint=${apiEndpoint}`);
+    return { type: 'openai_compat', endpoint: apiEndpoint, apiKey };
+  }
+
+  throw new Error(
+    `No backend available for model "${model}". Options:\n` +
+    `  Local:   Install Ollama and run: ollama pull ${model}\n` +
+    `  API:     Set OPENAI_BASE_URL + OPENAI_API_KEY in env, or add apiEndpoint/apiKey to salvage.json`
+  );
+}
+
+// ── callLLM ───────────────────────────────────────────────────────────────
+// Unified API-family entry point for non-Claude models (mlx-lm + Ollama).
+// Owns the full MCP agentic loop. Returns {code, stdout, stderr} like callClaude.
+// Architecture sources: ollama-mcp-bridge/proxy_service.py (loop),
+//   AnythingLLM/ollama.js (supportsNativeToolCalling → UnTooled fallback),
+//   Cline/ollama-format.ts (format differences).
+function truncateToolResult(text, maxChars = 40000) {
+  if (text.length <= maxChars) return text;
+  const head = 30000;
+  const tail = 5000;
+  const omitted = text.length - head - tail;
+  return text.slice(0, head)
+    + `\n\n[... ${omitted} chars omitted — middle of tool result truncated to fit context ...]\n\n`
+    + text.slice(text.length - tail);
+}
+
+// correctionInstruction: injected by outerRetryLoop on recovery attempts (planning-only, empty, exhausted).
+async function callLLM(model, userPrompt, mcpManager, correctionInstruction = null) {
+  let backend;
+  try { backend = await detectBackend(model); }
+  catch (e) { return { code: 1, stdout: '', stderr: e.message, meta: { roundsUsed: 0, finalAnswerProduced: false, toolCallsMade: 0, planningOnly: false, emptyResponse: true } }; }
+
+  // Workspace context cap: capable API models get more context than weak local models.
+  // Gemma/small local: 2KB cap (avoids Claude identity confusion + skill XML noise).
+  // openai_compat + mlx-verified: 10KB cap (still excludes raw skill XML but includes persona).
+  const isCapableBackend = backend.type === 'openai_compat' || backend.type === 'mlx';
+  const workspacePromptCap = isCapableBackend ? 10000 : 2000;
+  const workspacePrompt = (() => {
+    try {
+      const full = fs.readFileSync(tmpFile, 'utf-8');
+      return full.length > workspacePromptCap
+        ? full.slice(0, workspacePromptCap) + '\n...(context truncated for LLM)'
+        : full;
+    } catch { return ''; }
+  })();
+
+  // Tool list: memory_search (direct binary, always available) + real MCP tools
+  const MEMORY_TOOL = {
+    type: 'function',
+    function: {
+      name: 'salvage_memory_search',
+      description: 'Search YOUR personal memory (salvage-memory-search). This is your memory store containing past conversations, people you know, projects, and decisions. Call this whenever asked to "remember", "recall", "search your memory", or look up something from a previous session.',
+      parameters: { type: 'object', properties: { query: { type: 'string', description: 'Search query' } }, required: ['query'] },
+    },
+  };
+  // Tool cap: weak UnTooled models (Gemma) break with too many tools — schemas inflate context.
+  // Capable models (openai_compat, mlx-verified) handle the full tool list natively.
+  const UNTOOLED_FIRST_MODELS = ['gemma4', 'gemma-4', 'gemma 4'];
+  const isUnTooledFirst = UNTOOLED_FIRST_MODELS.some(m => model.toLowerCase().includes(m));
+  const LOCAL_LLM_MAX_TOOLS = 8;
+  const allTools = [MEMORY_TOOL, ...mcpManager.tools];
+  const rawTools = (isUnTooledFirst && allTools.length > LOCAL_LLM_MAX_TOOLS)
+    ? allTools.slice(0, LOCAL_LLM_MAX_TOOLS)
+    : allTools;
+  if (isUnTooledFirst && allTools.length > LOCAL_LLM_MAX_TOOLS) {
+    log(`callLLM: trimmed tools ${allTools.length} → ${rawTools.length} (UnTooled cap)`);
+  }
+
+  // Normalize tool names for local LLMs: OpenAI spec only allows [a-zA-Z0-9_-] in tool names.
+  // Dots (e.g. "filesystem.read_file") are illegal — Gemma ignores these and hallucinates tool names.
+  // Replace dots with underscores and keep a reverse map for routing real MCP calls.
+  // Source: OpenAI Function calling spec, tool name regex ^[a-zA-Z0-9_-]{1,64}$
+  const toolNameMap = {}; // normalized → original
+  const tools = rawTools.map(t => {
+    const origName = t.function.name;
+    const normName = origName.replace(/\./g, '_');
+    if (normName !== origName) toolNameMap[normName] = origName;
+    return { ...t, function: { ...t.function, name: normName } };
+  });
+  log(`callLLM: normalized tool names: ${Object.keys(toolNameMap).join(', ') || '(none needed)'}`);
+
+  // Tool instructions go FIRST — local models have small context windows and de-prioritize end-of-prompt content
+  // Short name list only (descriptions are already in the tool schemas passed to Ollama API).
+  // Long tool descriptions in the system prompt inflate token count and confuse small models.
+  const toolNames = tools.map(t => t.function.name).join(', ');
+  // Identity override FIRST — the workspace prompt was written for Claude and contains Claude identity
+  // instructions (e.g. "Claude Sonnet = default"). Without an explicit override, local models will
+  // impersonate Claude and refuse tool calls (thinking they are Claude with no tool access).
+  const toolInstructions = [
+    `## Runtime identity`,
+    `You are ${model}, a local AI running via Ollama with native tool calling. You are NOT Claude.`,
+    `Ignore any references to Claude models, Claude identity, or Claude-specific behaviors in the context below.`,
+    ``,
+    `## Tool use — MANDATORY`,
+    `Your registered tools are: ${toolNames}`,
+    `These are the ONLY valid tool names. Do NOT call any other name. Never call "google:*", "tool_code", "code_execution", or any made-up name.`,
+    `USE THEM. Never claim you lack access if a tool exists for the request.`,
+    `RULE: For any request to read, write, modify, search, look up, send, or act on anything — call the appropriate tool IMMEDIATELY.`,
+    ``,
+    `## CRITICAL: Act first, talk later`,
+    `When given a task that involves files, data, or external systems:`,
+    `- Your FIRST output MUST be a tool call — NOT a description, NOT a plan, NOT "I will do X".`,
+    `- Do not explain what you are going to do. Just do it.`,
+    `- Call tools in sequence until the task is complete.`,
+    `- Only send a final text message AFTER all tool calls are done.`,
+    `- If you respond with text before calling any tools on an action task, your response is WRONG.`,
+    ``,
+    `## IMPORTANT: Do NOT read SOUL.md, USER.md, TOOLS.md, IDENTITY.md, COMPANY.md, TEAM.md, SLACK.md, NOTION.md, AGENTS.md, HEARTBEAT.md, or MEMORY.md.`,
+    `These workspace context files are already included in this system prompt. Reading them again wastes turns.`,
+    `The ONLY files you should read are the target files specified in the user's task.`,
+    `---`, ``,
+  ].join('\n');
+  const systemPrompt = toolInstructions + workspacePrompt;
+
+  log(`callLLM: model=${model} backend=${backend.type}:${backend.port} tools=${tools.length}`);
+
+  function httpPost(port, urlPath, body, timeoutMs = 120000) {
+    return new Promise((resolve, reject) => {
+      const bodyStr = JSON.stringify(body);
+      const req = require('http').request({
+        hostname: '127.0.0.1', port, path: urlPath, method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyStr) },
+      }, res => {
+        let data = '';
+        res.on('data', c => data += c);
+        res.on('end', () => {
+          try { resolve(JSON.parse(data)); }
+          catch (e) { reject(new Error(`LLM parse error: ${data.slice(0, 200)}`)); }
+        });
+      });
+      req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error('LLM request timed out')); });
+      req.on('error', reject);
+      req.write(bodyStr);
+      req.end();
+    });
+  }
+
+  // Normalize raw HTTP response → { text, tool_calls: [{id, name, args}] }
+  // Format split: mlx-lm uses OpenAI choices[]; Ollama uses message{}
+  function normalizeResponse(raw) {
+    if (backend.type === 'mlx') {
+      const msg = raw?.choices?.[0]?.message || {};
+      return {
+        text: msg.content || '',
+        tool_calls: (msg.tool_calls || []).map(tc => ({
+          id: tc.id,
+          name: tc.function?.name,
+          args: (() => {
+            try { return typeof tc.function?.arguments === 'string'
+              ? JSON.parse(tc.function.arguments) : (tc.function?.arguments || {}); }
+            catch { return {}; }
+          })(),
+        })),
+      };
+    } else {
+      if (raw.error) throw new Error(raw.error);
+      const msg = raw.message || {};
+      return {
+        text: msg.content || '',
+        tool_calls: (msg.tool_calls || []).map(tc => ({
+          id: null,
+          name: tc.function?.name,
+          args: (() => {
+            try { return typeof tc.function?.arguments === 'string'
+              ? JSON.parse(tc.function.arguments) : (tc.function?.arguments || {}); }
+            catch { return {}; }
+          })(),
+        })),
+      };
+    }
+  }
+
+  // HTTP POST to an external HTTPS/HTTP endpoint (for openai_compat backends).
+  function httpPostRemote(url, body, headers = {}, timeoutMs = 120000) {
+    return new Promise((resolve, reject) => {
+      const { URL } = require('url');
+      const parsed = new URL(url);
+      const isHttps = parsed.protocol === 'https:';
+      const transport = require(isHttps ? 'https' : 'http');
+      const bodyStr = JSON.stringify(body);
+      const allHeaders = {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(bodyStr),
+        ...headers,
+      };
+      const req = transport.request({
+        hostname: parsed.hostname,
+        port: parsed.port || (isHttps ? 443 : 80),
+        path: parsed.pathname + (parsed.search || ''),
+        method: 'POST',
+        headers: allHeaders,
+      }, res => {
+        let data = '';
+        res.on('data', c => data += c);
+        res.on('end', () => {
+          try { resolve(JSON.parse(data)); }
+          catch (e) { reject(new Error(`Remote API parse error: ${data.slice(0, 300)}`)); }
+        });
+      });
+      req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error('Remote API request timed out')); });
+      req.on('error', reject);
+      req.write(bodyStr);
+      req.end();
+    });
+  }
+
+  async function providerChat(msgs, toolList) {
+    if (backend.type === 'openai_compat') {
+      // OpenAI-compatible API (Qwen, Together, Groq, etc.) — native tool calling, no UnTooled needed.
+      const raw = await httpPostRemote(
+        backend.endpoint.replace(/\/$/, '') + '/chat/completions',
+        { model, messages: msgs, stream: false, tools: toolList.length ? toolList : undefined, tool_choice: toolList.length ? 'auto' : undefined },
+        { 'Authorization': `Bearer ${backend.apiKey}` },
+        180000, // 3 min timeout for external APIs
+      );
+      return normalizeResponse(raw);
+    } else if (backend.type === 'mlx') {
+      const raw = await httpPost(backend.port, '/v1/chat/completions', {
+        model, messages: msgs, stream: false,
+        tools: toolList.length ? toolList : undefined,
+      });
+      return normalizeResponse(raw);
+    } else {
+      const body = { model, messages: msgs, stream: false, tools: toolList.length ? toolList : undefined, keep_alive: OLLAMA_KEEP_ALIVE };
+      const raw = await httpPost(backend.port, '/api/chat', body);
+      return normalizeResponse(raw);
+    }
+  }
+
+  // Tool result message format differs by backend
+  // Source: Cline/ollama-format.ts (role:"user" fallback), ollama-mcp-bridge (role:"tool")
+  function toolResultMsg(call, result) {
+    if (backend.type === 'mlx') {
+      return { role: 'tool', tool_call_id: call.id || 'call_0', content: result };
+    } else {
+      return { role: 'tool', tool_name: call.name, content: result };
+    }
+  }
+
+  // ── Native tool-calling agentic loop ─────────────────────────────────
+  // Source: ollama-mcp-bridge/proxy_service.py:103-145, AnythingLLM/aibitat/index.js:886
+  // Strategy: always inject tools (never hard-block on capability check).
+  // Empty tool_calls = model answered directly or doesn't support tool calling.
+
+  // If outerRetryLoop injected a correction, prepend it to the user prompt.
+  const effectiveUserPrompt = correctionInstruction
+    ? `${correctionInstruction}\n\n---\n\n${userPrompt}`
+    : userPrompt;
+
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: effectiveUserPrompt },
+  ];
+  const MAX_ROUNDS = 20; // Raised from 8 — complex tasks (multi-file refactors) need more turns
+  let finalText = '';
+  // Gemma 4's native tool calling is unreliable — skip to UnTooled grammar-constrained mode.
+  // isUnTooledFirst + isCapableBackend already set above from the same UNTOOLED_FIRST_MODELS list.
+  let unTooledMode = isUnTooledFirst;
+  // Planning-only detection: matches responses that describe what will be done without doing it.
+  // Source: OpenClaw agent runtime PLANNING_ONLY_PROMISE_RE pattern (openclaw dist, ~line 33237).
+  const PLANNING_ONLY_RE = /\b(i['']ll|i will|let me|going to|i'm going|i can do|i would|here['']s how|here is how|first[,\s]+i['']ll|next[,\s]+i['']ll|i['']d like to|i need to|i should)\b/i;
+  const PLANNING_DONE_RE = /\b(done|finished|complete|saved|written|modified|updated|here['']s the|here is the)\b/i;
+  let planningRetryUsed = false;
+
+  // Meta: outcome classification for outerRetryLoop
+  const meta = { roundsUsed: 0, finalAnswerProduced: false, toolCallsMade: 0, planningOnly: false, emptyResponse: false, sentProgressUpdates: 0 };
+
+  // For UnTooled-first models (Gemma 4), skip the native tool loop entirely
+  if (isUnTooledFirst) {
+    log('callLLM: UnTooled-first model — skipping native loop, going straight to UnTooled fallback');
+  }
+
+  for (let round = 0; !isUnTooledFirst && round < MAX_ROUNDS; round++) {
+    meta.roundsUsed = round + 1;
+    let response;
+    try { response = await providerChat(messages, unTooledMode ? [] : tools); }
+    catch (e) { return { code: 1, stdout: '', stderr: e.message, meta }; }
+
+    const { text, tool_calls } = response;
+
+    if (!text?.trim() && !tool_calls.length) meta.emptyResponse = true;
+
+    if (!tool_calls.length) {
+      if (tools.length > 0 && !planningRetryUsed && PLANNING_ONLY_RE.test(text) && !PLANNING_DONE_RE.test(text)) {
+        // Planning-only response detected (OpenClaw approach): inject retry instruction.
+        log(`callLLM: planning-only turn detected (round=${round}) — injecting retry instruction`);
+        meta.planningOnly = true;
+        planningRetryUsed = true;
+        messages.push({ role: 'assistant', content: text });
+        messages.push({ role: 'user', content: 'The previous turn only described the plan. Do not restate the plan. Act now: take the first concrete tool action you can. If a real blocker prevents action, reply with the exact blocker in one sentence.' });
+        continue;
+      }
+      if (round === 0 && tools.length > 0 && !text.trim()) {
+        // Empty response on round 0 → switch to UnTooled mode
+        log('callLLM: empty response round 0 — switching to UnTooled mode');
+        unTooledMode = true;
+        continue;
+      }
+      if (planningRetryUsed && !tool_calls.length) {
+        // Retry also produced no tool calls → grammar-constrained UnTooled fallback
+        log('callLLM: planning retry failed — switching to UnTooled mode');
+        unTooledMode = true;
+        break;
+      }
+      finalText = text;
+      break;
+    }
+
+    // Append assistant turn (format differs by backend)
+    if (backend.type === 'mlx') {
+      messages.push({ role: 'assistant', content: text || null, tool_calls: tool_calls.map((tc, i) => ({
+        id: tc.id || `call_${i}`, type: 'function',
+        function: { name: tc.name, arguments: JSON.stringify(tc.args) },
+      }))});
+    } else {
+      messages.push({ role: 'assistant', content: text, tool_calls: tool_calls.map(tc => ({
+        function: { name: tc.name, arguments: tc.args },
+      }))});
+    }
+
+    // Execute each tool via MCPClientManager
+    for (const call of tool_calls) {
+      meta.toolCallsMade++;
+      // Reverse-map normalized name (underscores) back to original MCP name (dots)
+      const realName = toolNameMap[call.name] || call.name;
+      log(`callLLM[round=${round}]: ${call.name}→${realName}(${JSON.stringify(call.args).slice(0, 120)})`);
+      let result = await mcpManager.callTool(realName, call.args);
+      result = truncateToolResult(result);
+      log(`callLLM: result: ${result.slice(0, 120)}`);
+      // Inject correction on tool failures — tell the model exactly how to fix the call
+      const isFailed = result.startsWith('Unknown tool:') || result.startsWith('Tool error:') ||
+                       result.startsWith('MCP error') || result.includes('Access denied') ||
+                       result.includes('outside allowed directories');
+      if (isFailed) {
+        result += `\n\nCORRECTION: The tool call failed. Your valid tools are: ${toolNames}\nFilesystem tools require absolute paths. The correct username is "jayden.csai" (not "jayden").\nUse the "path" parameter (not "file_path").\nExample: filesystem_read_file with {"path": "/Users/jayden.csai/bin/voice-bubble.py"}\nDo NOT call "google:*", "tool_code", or any made-up name.`;
+      }
+      messages.push(toolResultMsg(call, result));
+    }
+  }
+
+  // ── UnTooled fallback ─────────────────────────────────────────────────
+  // Source: AnythingLLM/untooled.js — prompt-inject tool catalog + grammar-constrained output.
+  // Uses Ollama's format field (JSON Schema) to enforce syntactic structure.
+  if (unTooledMode || !finalText) {
+    log('callLLM: entering UnTooled fallback');
+    const toolCatalog = tools.map(t =>
+      `- ${t.function.name}: ${t.function.description}\n  args: ${JSON.stringify(t.function.parameters?.properties || {})}`
+    ).join('\n');
+
+    // Detect if Slack reply tools are available (for 随時報告 guidance)
+    const hasSlackReply = tools.some(t => t.function.name === 'slack_reply_to_thread');
+    const progressSection = hasSlackReply ? [
+      '',
+      '## Progress reporting (随時報告)',
+      'For tasks requiring more than ~4 tool calls:',
+      '- After every 3–4 tool calls, send a brief progress update to the user via slack_reply_to_thread.',
+      '- Use the same channel and thread_ts that the user\'s message came from (check your context/session for these values).',
+      '- Keep progress messages short: one line describing what you just completed and what you are doing next.',
+      '- Example: {"name":"slack_reply_to_thread","arguments":{"channel":"C123","thread_ts":"123.456","text":"✅ ステップ1完了。次はXXXを確認します。"}}',
+      '- After all work is done, your final_answer should be a brief completion summary — do NOT repeat everything you already reported.',
+    ] : [];
+
+    const unTooledSystem = systemPrompt + [
+      '', '---', '## Tool calling format',
+      'Available tools:', toolCatalog, '',
+      'To call a tool, output ONLY valid JSON: {"name":"tool_name","arguments":{...}}',
+      'To give your final answer, output ONLY valid JSON: {"name":"final_answer","arguments":{"text":"your response"}}',
+      ...progressSection,
+    ].join('\n');
+
+    // Prepend a hard override to the user prompt: force tool calls before text.
+    // The WORKER_MODE text ("write your complete response as plain text") causes Gemma
+    // to output final_answer immediately. This override must appear BEFORE WORKER_MODE content.
+    // Cold-start prompt: force at least one tool call before answering.
+    const unTooledUserPrompt = [
+      `[INSTRUCTION OVERRIDE — takes precedence over all other instructions]`,
+      `You MUST call at least one tool before outputting final_answer.`,
+      `Output {"name":"final_answer","arguments":{"text":"..."}} ONLY after completing all tool calls.`,
+      `Do NOT output final_answer as your first response. Call a tool first.`,
+      `---`,
+      userPrompt,
+    ].join('\n');
+
+    // Restored-session prompt: Gemma already has prior tool context — let her answer directly.
+    const restoredUserPrompt = [
+      `[CONTINUATION — prior session context is above]`,
+      `You have prior tool call results in your context. Answer directly if you already have the information.`,
+      `If more information is needed to answer, call a tool first. Otherwise output final_answer.`,
+      `---`,
+      userPrompt,
+    ].join('\n');
+
+    let unTooledMsgs = [
+      { role: 'system', content: unTooledSystem },
+      { role: 'user', content: unTooledUserPrompt },
+    ];
+
+    // ── Session persistence (thread-keyed) ───────────────────────────────
+    const SESSION_DIR = path.join(HOME, '.salvage', 'sessions');
+    const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+    fs.mkdirSync(SESSION_DIR, { recursive: true });
+    const sessionFile = threadTs
+      ? path.join(SESSION_DIR, `${threadTs.replace(/\./g, '_')}.json`)
+      : null;
+
+    let isRestored = false; // true when a prior session was loaded
+
+    // Compact a session that has grown too large by summarizing the middle turns.
+    // Keeps: system prompt, last KEEP_RECENT pairs verbatim, new user message.
+    // Summarizes everything in between using a fast Gemma call (same model, no subworker).
+    const SESSION_COMPACT_CHARS = 80000; // ~23K tokens — trigger threshold
+    const KEEP_RECENT_PAIRS = 3;         // verbatim pairs (assistant+user) to preserve at tail
+
+    async function compactSessionMsgs(msgs, newUserMsg) {
+      const systemMsg = msgs[0]; // always index 0
+      const history = msgs.slice(1); // everything after system
+
+      // Keep the last KEEP_RECENT_PAIRS * 2 messages verbatim
+      const keepN = KEEP_RECENT_PAIRS * 2;
+      const toSummarize = history.slice(0, Math.max(0, history.length - keepN));
+      const recent = history.slice(Math.max(0, history.length - keepN));
+
+      if (toSummarize.length === 0) {
+        // Nothing to compact — just append new message
+        msgs.push(newUserMsg);
+        return msgs;
+      }
+
+      // Format the history to summarize as a readable transcript
+      const transcript = toSummarize.map(m => `[${m.role.toUpperCase()}]\n${m.content}`).join('\n\n');
+      const summarizePrompt = [
+        'You are a precise summarizer. Summarize the following conversation transcript in 200 words or fewer.',
+        'Preserve: all filenames, paths, function names, decisions made, errors found, and what was completed.',
+        'Do NOT include tool JSON syntax. Write plain prose.',
+        '---',
+        transcript,
+        '---',
+        'Summary:',
+      ].join('\n');
+
+      log(`callLLM[session]: compacting — summarizing ${toSummarize.length} msgs (${transcript.length} chars)`);
+      let summary = '[Prior context summary unavailable]';
+      try {
+        if (backend.type === 'ollama') {
+          const raw = await httpPost(backend.port, '/api/chat', {
+            model,
+            messages: [{ role: 'user', content: summarizePrompt }],
+            stream: false,
+            keep_alive: OLLAMA_KEEP_ALIVE,
+            options: { temperature: 0.1 }, // num_predict omitted — causes blank output in Gemma 4
+          }, 60000); // 60s timeout for summary
+          summary = raw?.message?.content?.trim() || summary;
+        }
+        log(`callLLM[session]: compaction done — summary: ${summary.slice(0, 120)}`);
+      } catch (e) {
+        log(`callLLM[session]: compaction failed — ${e.message}, falling back to drop`);
+        // Fallback: just drop the old messages rather than failing the whole job
+      }
+
+      return [
+        systemMsg,
+        { role: 'user', content: `[PRIOR CONTEXT SUMMARY — ${toSummarize.length} turns compacted]\n${summary}` },
+        { role: 'assistant', content: 'Understood. Continuing from prior context.' },
+        ...recent,
+        newUserMsg,
+      ];
+    }
+
+    if (sessionFile && fs.existsSync(sessionFile)) {
+      try {
+        const saved = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
+        const age = Date.now() - saved.savedAt;
+        if (age < SESSION_TTL_MS) {
+          unTooledMsgs = saved.msgs;
+          // Refresh system prompt (tool catalog may have changed between invocations)
+          if (unTooledMsgs.length > 0 && unTooledMsgs[0].role === 'system') {
+            unTooledMsgs[0] = { role: 'system', content: unTooledSystem };
+          }
+          const newUserMsg = { role: 'user', content: restoredUserPrompt };
+          const sessionChars = JSON.stringify(unTooledMsgs).length;
+
+          if (sessionChars > SESSION_COMPACT_CHARS) {
+            // Session too large — summarize old turns before appending new message
+            log(`callLLM[session]: session ${Math.round(sessionChars / 1024)}KB exceeds ${Math.round(SESSION_COMPACT_CHARS / 1024)}KB — compacting`);
+            unTooledMsgs = await compactSessionMsgs(unTooledMsgs, newUserMsg);
+          } else {
+            // Session fits — just append (with role separator if needed)
+            const lastRole = unTooledMsgs[unTooledMsgs.length - 1]?.role;
+            if (lastRole === 'user') {
+              unTooledMsgs.push({ role: 'assistant', content: '[Ready for next message]' });
+            }
+            unTooledMsgs.push(newUserMsg);
+          }
+
+          isRestored = true;
+          log(`callLLM[session]: resumed thread session (${saved.msgs.length} msgs → ${unTooledMsgs.length} msgs after compact, age ${Math.round(age / 60000)}m)`);
+        } else {
+          fs.unlinkSync(sessionFile);
+          log(`callLLM[session]: expired session deleted`);
+        }
+      } catch (e) {
+        log(`callLLM[session]: load error — ${e.message}`);
+      }
+    }
+
+    // Use enum for the name field so Ollama's grammar engine is forced to pick
+    // a real tool name (or "final_answer"). Without enum, Ollama may produce
+    // JSON without a name field at all (required[] not strictly enforced).
+    // On round 0 of a COLD start: exclude final_answer to force at least one tool call.
+    // On round 0 of a RESTORED session: include final_answer — Gemma already has context
+    // from prior turns and may legitimately answer without calling another tool.
+    const toolOnlyEnum = tools.map(t => t.function.name);
+    const toolPlusFinalEnum = [...toolOnlyEnum, 'final_answer'];
+
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      meta.roundsUsed = round + 1;
+
+      // Mid-task context guard: compact if session is growing too large mid-task
+      if (round > 0) {
+        const midCtxSize = JSON.stringify(unTooledMsgs).length;
+        if (midCtxSize > 100000) {
+          log(`callLLM[UnTooled]: context ${Math.round(midCtxSize / 1024)}KB — compacting mid-task (round ${round})`);
+          unTooledMsgs = await compactSessionMsgs(unTooledMsgs, null);
+        }
+      }
+
+      // Restored sessions allow final_answer on round 0; cold starts must call a tool first
+      const currentEnum = (round === 0 && !isRestored) ? toolOnlyEnum : toolPlusFinalEnum;
+      const unTooledSchema = {
+        type: 'object',
+        properties: {
+          name: { type: 'string', enum: currentEnum },
+          arguments: { type: 'object' },
+        },
+        required: ['name', 'arguments'],
+      };
+      let text;
+      try {
+        if (backend.type === 'ollama') {
+          const raw = await httpPost(backend.port, '/api/chat', {
+            model, messages: unTooledMsgs, stream: false,
+            keep_alive: OLLAMA_KEEP_ALIVE,
+            format: unTooledSchema, options: { temperature: 0.1 },
+          });
+          text = raw?.message?.content || '';
+        } else {
+          const resp = await providerChat(unTooledMsgs, []);
+          text = resp.text;
+        }
+      } catch (e) { finalText = `[UnTooled error: ${e.message}]`; break; }
+
+      log(`callLLM[UnTooled raw round=${round}]: ${(text || '').slice(0, 200)}`);
+
+      // Strip markdown code fences — Gemma 4 wraps JSON in ```json...``` even with grammar constraints
+      const cleanText = (text || '').replace(/^```(?:json)?\s*/im, '').replace(/\s*```\s*$/m, '').trim();
+
+      let parsed;
+      try { parsed = JSON.parse(cleanText); }
+      catch (e) {
+        if (round > 0) {
+          // After at least one tool call, plain text is a valid final answer — accept it directly
+          log(`callLLM[UnTooled]: plain-text final answer after ${round} tool round(s)`);
+          finalText = text;
+        } else {
+          log(`callLLM[UnTooled parse error]: ${e.message} — text="${(text||'').slice(0,100)}"`);
+          finalText = text;
+        }
+        break;
+      }
+
+      // Normalize field names — Gemma uses many different formats:
+      //   {"name":"X","arguments":{}}  — canonical
+      //   {"tool_name":"X","parameters":{}} — common variant
+      //   {"tool_calls":[{"function":"X","args":{}}]} — OpenAI-style array
+      //   [{"name":"X","arguments":{}}] — bare array
+      let parsedEntry = parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) parsedEntry = parsed[0];
+      if (parsedEntry.tool_calls && Array.isArray(parsedEntry.tool_calls) && parsedEntry.tool_calls.length > 0) {
+        parsedEntry = parsedEntry.tool_calls[0];
+      }
+      const parsedName = parsedEntry.name || parsedEntry.tool_name || parsedEntry.function || parsedEntry.action;
+      const parsedArgs = parsedEntry.arguments || parsedEntry.parameters || parsedEntry.args || parsedEntry.inputs || {};
+
+      if (!parsedName || parsedName === 'final_answer') {
+        finalText = parsedArgs.text || parsedEntry.text || parsed.text || parsed.response || cleanText;
+        break;
+      }
+
+      // Resolve relative paths in args to absolute (Gemma often uses just "voice-bubble.py" or wrong subdirs)
+      for (const key of ['path', 'file_path', 'filename']) {
+        if (parsedArgs[key] && !parsedArgs[key].startsWith('/') && !parsedArgs[key].startsWith('~')) {
+          const origVal = parsedArgs[key];
+          const baseName = require('path').basename(origVal); // handle "voice-bubble/voice-bubble.py" → "voice-bubble.py"
+          // Try both full relative path and basename in each candidate directory
+          const searchNames = origVal === baseName ? [origVal] : [origVal, baseName];
+          const searchDirs = [path.join(HOME, 'bin'), path.join(HOME, 'clawd'), path.join(HOME, 'Developer')];
+          let found;
+          outer: for (const name of searchNames) {
+            for (const dir of searchDirs) {
+              const candidate = path.join(dir, name);
+              try { require('fs').accessSync(candidate); found = candidate; break outer; } catch {}
+            }
+          }
+          if (found) { log(`callLLM[UnTooled]: resolved relative path "${origVal}" → "${found}"`); parsedArgs[key] = found; }
+        }
+      }
+
+      // Normalize parameter aliases — Gemma uses file_path/filename but filesystem MCP expects path
+      if (parsedArgs.file_path !== undefined && parsedArgs.path === undefined) {
+        parsedArgs.path = parsedArgs.file_path;
+        delete parsedArgs.file_path;
+        log(`callLLM[UnTooled]: remapped file_path → path`);
+      }
+      if (parsedArgs.filename !== undefined && parsedArgs.path === undefined) {
+        parsedArgs.path = parsedArgs.filename;
+        delete parsedArgs.filename;
+        log(`callLLM[UnTooled]: remapped filename → path`);
+      }
+      // Also remap content alias
+      if (parsedArgs.content === undefined && parsedArgs.text !== undefined && parsedArgs.path !== undefined) {
+        parsedArgs.content = parsedArgs.text;
+        delete parsedArgs.text;
+        log(`callLLM[UnTooled]: remapped text → content`);
+      }
+
+      // Tool call — execute and feed result back (reverse-map normalized name if needed)
+      const realUnTooledName = toolNameMap[parsedName] || parsedName;
+      log(`callLLM[UnTooled round=${round}]: ${parsedName}→${realUnTooledName}(${JSON.stringify(parsedArgs).slice(0, 120)})`);
+      // Track mid-task Slack progress updates sent by the model
+      if (realUnTooledName === 'slack_reply_to_thread' || realUnTooledName === 'slack_post_message') {
+        meta.sentProgressUpdates++;
+        log(`callLLM[UnTooled]: progress update #${meta.sentProgressUpdates} sent via ${realUnTooledName}`);
+      }
+      let result = await mcpManager.callTool(realUnTooledName, parsedArgs);
+      result = truncateToolResult(result);
+      log(`callLLM[UnTooled result]: ${result.slice(0, 120)}`);
+      // Inject correction on UnTooled failures too
+      if (result.startsWith('Unknown tool:') || result.includes('Access denied') || result.includes('outside allowed') ||
+          result.includes('Input validation error') || result.includes('MCP error')) {
+        result += `\n\nCORRECTION: The tool call failed. Retry now using: name="${realUnTooledName}", arguments={"path":"<absolute path>"}. The "path" key is required — do NOT use "file_path" or "filename". Absolute path example: /Users/jayden.csai/bin/voice-bubble.py`;
+      }
+      meta.toolCallsMade++;
+      unTooledMsgs.push({ role: 'assistant', content: text });
+      unTooledMsgs.push({ role: 'user', content: `Tool result for ${parsedName}:\n${result}` });
+
+      // Save session after each successful tool round
+      if (sessionFile) {
+        try {
+          fs.writeFileSync(sessionFile, JSON.stringify({ savedAt: Date.now(), msgs: unTooledMsgs }));
+        } catch (e) {
+          log(`callLLM[session]: save error — ${e.message}`);
+        }
+      }
+    }
+
+    // Save final answer inside this block (sessionFile/unTooledMsgs are in scope here).
+    // Must run after the round loop so finalText is set.
+    const finalAnswer = finalText || '[Model produced no response]';
+    if (sessionFile) {
+      try {
+        unTooledMsgs.push({ role: 'assistant', content: finalAnswer });
+        fs.writeFileSync(sessionFile, JSON.stringify({ savedAt: Date.now(), msgs: unTooledMsgs }));
+        log(`callLLM[session]: saved final answer (${unTooledMsgs.length} msgs total)`);
+      } catch (e) {
+        log(`callLLM[session]: final save error — ${e.message}`);
+      }
+    }
+  }
+
+  const hadFinalAnswer = !!finalText;
+  if (!finalText) {
+    finalText = '[Model produced no response]';
+    meta.emptyResponse = true;
+  }
+  meta.finalAnswerProduced = hadFinalAnswer;
+  // If all rounds ran but no final answer, flag as exhausted (helps outerRetryLoop classify)
+  if (!hadFinalAnswer && meta.roundsUsed >= MAX_ROUNDS) {
+    return { code: 1, stdout: '', stderr: `Rounds exhausted after ${MAX_ROUNDS} tool calls without final answer`, meta };
+  }
+  return { code: hadFinalAnswer ? 0 : 1, stdout: finalText, stderr: '', meta };
+}
+
+// outerRetryLoop: wraps callLLM with OpenClaw-style recovery.
+// Classifies outcomes from meta and retries with correctionInstruction when safe to do so.
+async function outerRetryLoop(model, userPrompt, mcpManager) {
+  const MAX_PLANNING_RETRIES  = 2; // planning-only (no tools called)
+  const MAX_EMPTY_RETRIES     = 1; // empty / unparseable response
+  const MAX_EXHAUSTED_RETRIES = 2; // rounds exhausted without final answer
+
+  let planningRetries  = 0;
+  let emptyRetries     = 0;
+  let exhaustedRetries = 0;
+
+  let lastResult;
+  while (true) {
+    let correction = null;
+
+    // Build correction instruction based on previous failure
+    if (lastResult) {
+      const m = lastResult.meta || {};
+      if (m.emptyResponse) {
+        correction = 'Your last response was empty or could not be parsed. ' +
+          'You MUST respond with a valid JSON object: {"name":"<tool_name>","arguments":{...}} ' +
+          'or {"name":"final_answer","arguments":{"text":"<answer>"}}. Do not add any prose outside the JSON.';
+      } else if (m.planningOnly) {
+        correction = 'You have been planning or reasoning without using any tools. ' +
+          'You MUST call a tool NOW before continuing. Pick the most relevant tool and call it immediately.';
+      } else {
+        // rounds exhausted
+        correction = `You used all ${m.roundsUsed} allowed tool-call rounds without producing a final answer. ` +
+          'Focus: call only the single most important tool next, then immediately respond with final_answer.';
+      }
+    }
+
+    lastResult = await callLLM(model, userPrompt, mcpManager, correction);
+    const m = lastResult.meta || {};
+
+    // Success
+    if (lastResult.code === 0) return lastResult;
+
+    // Classify failure and decide whether to retry
+    if (m.emptyResponse) {
+      emptyRetries++;
+      log(`outerRetryLoop: empty response — retry ${emptyRetries}/${MAX_EMPTY_RETRIES}`);
+      if (emptyRetries > MAX_EMPTY_RETRIES) break;
+      continue;
+    }
+
+    if (m.planningOnly) {
+      planningRetries++;
+      log(`outerRetryLoop: planning-only — retry ${planningRetries}/${MAX_PLANNING_RETRIES}`);
+      if (planningRetries > MAX_PLANNING_RETRIES) break;
+      continue;
+    }
+
+    // rounds exhausted
+    exhaustedRetries++;
+    log(`outerRetryLoop: rounds exhausted — retry ${exhaustedRetries}/${MAX_EXHAUSTED_RETRIES}`);
+    if (exhaustedRetries > MAX_EXHAUSTED_RETRIES) break;
+  }
+
+  // All retries spent — return last result (code 1)
+  log(`outerRetryLoop: all retries exhausted, returning last failure`);
+  return lastResult;
+}
 
 function callClaude(attempt = 1) {
   return new Promise((resolve, reject) => {
@@ -1293,8 +2349,54 @@ async function main() {
     });
 
     // ── Tier 1-3: Failover Cascade ───────────────────────────────────
-    // Attempt 1: Normal call
-    let result = await callClaude(1);
+    // Two provider families:
+    //   CLI family  — Claude (and future CLIs): subprocess, owns its own MCP/tools/session
+    //   API family  — local LLMs (mlx-lm, Ollama): we own MCPClientManager + agentic loop
+    let _model = config.model || 'default';
+    for (let i = 0; i < passThroughArgs.length; i++) {
+      if (passThroughArgs[i] === '--model') { _model = passThroughArgs[i + 1] || _model; break; }
+    }
+    const _isClaude = !_model || _model === 'default' || /^claude[-\s]|^(sonnet|opus|haiku)/i.test(_model);
+    const localModel = !_isClaude
+      ? (_model.startsWith('ollama/') ? _model.slice('ollama/'.length) : _model)
+      : null;
+
+    // Pre-warm MCPClientManager for API-family models in parallel with remaining setup.
+    // Source: ollama-mcp-bridge/lifecycle.py — initialize at startup, not on first call.
+    // Uses mcp-config-local.json (excludes Claude-dependent servers like mgc-proxy/vercel).
+    const LOCAL_MCP_CONFIG = path.join(HOME, '.salvage/mcp-config-local.json');
+    const mcpManager = new MCPClientManager();
+    activeMcpManager = mcpManager;
+    const mcpWarmPromise = localModel
+      ? mcpManager.load(LOCAL_MCP_CONFIG)
+      : Promise.resolve();
+
+    // Attempt 1: Normal call (outerRetryLoop handles model-level recovery for local/API models)
+    let result;
+    if (localModel) {
+      await mcpWarmPromise; // ensure MCP servers are ready before inference
+      result = await outerRetryLoop(localModel, userPrompt, mcpManager);
+    } else {
+      result = await callClaude(1);
+    }
+
+    // API-family path: emit stream-json result event for callers using --output-format stream-json.
+    // Claude CLI emits this natively; we replicate it for local LLM responses.
+    if (localModel && result.code === 0) {
+      const wantStreamJson = passThroughArgs.includes('stream-json');
+      if (wantStreamJson) {
+        // Leading \n ensures no partial prior output gets concatenated with the JSON.
+        // sentProgressUpdates lets vanessa-worker know if Gemma sent mid-task Slack updates
+        // so it can post a shorter final message instead of the full final_answer.
+        process.stdout.write('\n' + JSON.stringify({
+          type: 'result', subtype: 'success', result: result.stdout,
+          sentProgressUpdates: result.meta?.sentProgressUpdates ?? 0,
+        }) + '\n');
+      } else {
+        // Plain text callers (e.g. chatbox bridge with --output-format text)
+        process.stdout.write(result.stdout);
+      }
+    }
 
     if (result.code !== 0) {
       const error = formatUserFacingError(result.code, result.stderr, result.stdout);

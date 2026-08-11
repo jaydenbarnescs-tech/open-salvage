@@ -1,0 +1,123 @@
+#!/opt/homebrew/bin/node
+'use strict';
+// salvage-llm — Unified LLM router for salvage sub-agents
+// Routes to Claude CLI or Ollama based on model name.
+//
+// Usage:
+//   salvage-llm --model <model> -p <prompt> [--max-turns N] [--output-format text]
+//
+// Claude models (claude-*): routed through salvage → claude CLI
+// Everything else: routed through ollama run
+
+const { spawn } = require('child_process');
+const path = require('path');
+const fs = require('fs');
+
+const HOME = process.env.HOME || '/Users/jayden.csai';
+const SALVAGE = path.join(HOME, 'bin/salvage');
+const OLLAMA = '/usr/local/bin/ollama';
+const SESSION_DIR = path.join(HOME, '.salvage/llm-sessions');
+
+// ── Parse args ──────────────────────────────────────────────────────────
+const args = process.argv.slice(2);
+let model = null;
+let prompt = null;
+let workspace = null;
+const extraArgs = [];
+
+for (let i = 0; i < args.length; i++) {
+  switch (args[i]) {
+    case '--model': model = args[++i]; break;
+    case '-p': case '--prompt': prompt = args[++i]; break;
+    case '--workspace': workspace = args[++i]; break;
+    default: extraArgs.push(args[i]); break;
+  }
+}
+
+if (!model || !prompt) {
+  console.error('Usage: salvage-llm --model <model> -p <prompt> [--workspace <dir>]');
+  process.exit(1);
+}
+
+// ── Route decision ──────────────────────────────────────────────────────
+const isClaude = /^claude[-\s]|^(sonnet|opus|haiku)/i.test(model);
+
+if (isClaude) {
+  // Route through salvage (which calls claude CLI)
+  const salvageArgs = [
+    '--workspace', workspace || path.join(HOME, 'clawd'),
+    '--task', 'general',
+    '--fresh',
+    '--minimal',
+    '--no-live-state',
+    '--no-memory',
+    '--no-mcp',
+    '-p', prompt,
+    '--model', model,
+    '--max-turns', '10',
+    '--output-format', 'text',
+    '--dangerously-skip-permissions',
+    ...extraArgs,
+  ];
+
+  const child = spawn(SALVAGE, salvageArgs, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      PATH: `${HOME}/bin:/opt/homebrew/bin:/opt/homebrew/opt/node/bin:/usr/local/bin:/usr/bin:/bin`,
+      HOME,
+    },
+  });
+
+  let stdout = '';
+  child.stdout.on('data', d => { stdout += d; process.stdout.write(d); });
+  child.stderr.on('data', d => process.stderr.write(d));
+  child.on('close', code => process.exit(code || 0));
+  child.on('error', err => { console.error(`[salvage-llm] Claude error: ${err.message}`); process.exit(1); });
+
+} else {
+  // Route through Ollama — write session log for HUD visibility
+  fs.mkdirSync(SESSION_DIR, { recursive: true });
+  const sessionFile = path.join(SESSION_DIR, `${process.pid}.jsonl`);
+
+  // Log the prompt
+  fs.appendFileSync(sessionFile, JSON.stringify({
+    type: 'message', role: 'user', ts: new Date().toISOString(),
+    model, content: prompt.slice(0, 2000),
+  }) + '\n');
+
+  const child = spawn(OLLAMA, ['run', model], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      PATH: `${HOME}/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`,
+      HOME,
+    },
+  });
+
+  child.stdin.write(prompt);
+  child.stdin.end();
+
+  let stdout = '';
+  child.stdout.on('data', d => { stdout += d; process.stdout.write(d); });
+  child.stderr.on('data', d => process.stderr.write(d));
+  child.on('close', code => {
+    // Log the response
+    fs.appendFileSync(sessionFile, JSON.stringify({
+      type: 'message', role: 'assistant', ts: new Date().toISOString(),
+      model, content: stdout.trim().slice(0, 4000),
+    }) + '\n');
+    // Clean up old session files (keep last 20)
+    try {
+      const files = fs.readdirSync(SESSION_DIR)
+        .filter(f => f.endsWith('.jsonl'))
+        .map(f => ({ name: f, mtime: fs.statSync(path.join(SESSION_DIR, f)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime);
+      for (const f of files.slice(20)) {
+        fs.unlinkSync(path.join(SESSION_DIR, f));
+      }
+    } catch {}
+    process.exit(code || 0);
+  });
+  child.on('error', err => { console.error(`[salvage-llm] Ollama error: ${err.message}`); process.exit(1); });
+}

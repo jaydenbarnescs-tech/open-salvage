@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Register-repo scaffolding only."
+echo "Planned behavior:"
+echo "- append a draft repo entry to config/agents/registry.yaml"
+echo "- require id, path, summary/role, status, and related docs where known"

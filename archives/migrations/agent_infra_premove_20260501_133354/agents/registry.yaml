@@ -1,0 +1,151 @@
+version: 1
+last_updated: "2026-05-01"
+status: draft
+
+meta:
+  purpose: "Canonical registry for shared agent infrastructure"
+  authoritative_root: "/Users/jayden.csai/clawd"
+  notes:
+    - "CLI remains the execution layer."
+    - "MCP is used selectively as a discoverability/control layer."
+    - "Back up before overwriting any managed output."
+
+rules:
+  common:
+    - id: backup_before_change
+      text: "Never delete, overwrite, or migrate shared infrastructure without first creating a timestamped backup, manifest, and rollback path."
+    - id: preserve_unknown_content
+      text: "Preserve unknown user-authored content unless explicitly approved to remove it."
+    - id: register_before_shared
+      text: "New shared tools, repos, and workflows must be registered before they are considered part of the shared platform."
+    - id: archive_not_delete
+      text: "Deprecated infrastructure is archived before any cleanup is considered."
+
+locations:
+  archives_root: "/Users/jayden.csai/clawd/archives"
+  manifests_root: "/Users/jayden.csai/clawd/archives/manifests"
+  migrations_root: "/Users/jayden.csai/clawd/archives/migrations"
+  generated_docs_root: "/Users/jayden.csai/clawd"
+  scripts_root: "/Users/jayden.csai/clawd/scripts"
+
+tool_collections:
+  local_bin:
+    path: "/Users/jayden.csai/bin"
+    description: "Primary user-level CLI utilities"
+    status: active
+  clawd_bin:
+    path: "/Users/jayden.csai/clawd/bin"
+    description: "Shared Salvage/OpenClaw-era CLI utilities"
+    status: active
+
+systems:
+  - id: nippo-sync
+    type: system
+    status: active
+    names:
+      - "nippo-sync"
+      - "nippou-syncro-kun"
+      - "nippo-sync-local"
+      - "日報シンクロくん"
+    repo_path: "/Users/jayden.csai/Developer/nippo-sync-local"
+    github:
+      - "jaydenbarnescs-tech/nippo-sync"
+      - "jaydenbarnescs-tech/nippou-syncro-kun"
+    docs:
+      - "/Users/jayden.csai/Developer/nippo-sync-local/README.md"
+      - "/Users/jayden.csai/Developer/nippo-sync-local/docs/PRD_v2.md"
+    summary: "AI-powered daily report system with Slack/web inputs, Supabase, Notion, n8n, and RAG."
+
+  - id: icoca-scraper
+    type: system
+    status: active
+    names:
+      - "icoca-scraper"
+      - "ICOCA scraper"
+    repo_path: "/Users/jayden.csai/Developer/icoca-scraper"
+    docs:
+      - "/Users/jayden.csai/Developer/icoca-scraper/scrape.js"
+    summary: "Playwright-based WESTER/ICOCA automation with OTP retrieval via shared proxy."
+
+  - id: gemini-watermark-remover
+    type: system
+    status: active
+    names:
+      - "gemini-watermark-remover"
+      - "Gemini watermark remover"
+    repo_path: "/Users/jayden.csai/Developer/gemini-watermark-remover"
+    github:
+      - "GargantuaX/gemini-watermark-remover"
+    docs:
+      - "/Users/jayden.csai/Developer/gemini-watermark-remover/README.md"
+    summary: "Lossless Gemini watermark removal using reverse alpha blending."
+
+tools:
+  - id: rmwhite
+    type: cli
+    status: active
+    path: "/Users/jayden.csai/bin/rmwhite"
+    command: "rmwhite"
+    aliases:
+      - "remove white background"
+      - "make white background transparent"
+    intent_keywords:
+      - "white background"
+      - "transparent png"
+      - "remove white"
+    use_when:
+      - "Use for PNGs with white matte backgrounds that should become transparent."
+    risk_level: low
+    promote_to_mcp: true
+    owner: "jayden"
+
+  - id: site-scan
+    type: cli
+    status: active
+    path: "/Users/jayden.csai/bin/site-scan"
+    command: "site-scan"
+    aliases:
+      - "scan site assets"
+      - "analyze website visuals"
+    use_when:
+      - "Use for screenshot capture, asset extraction, and visual design analysis of websites."
+    risk_level: medium
+    promote_to_mcp: true
+    owner: "jayden"
+
+  - id: worksheet
+    type: cli
+    status: active
+    path: "/Users/jayden.csai/bin/worksheet"
+    command: "worksheet"
+    aliases:
+      - "make worksheet"
+      - "generate worksheet"
+    use_when:
+      - "Use for printable worksheet generation workflows."
+    risk_level: medium
+    promote_to_mcp: true
+    owner: "jayden"
+
+mcp_servers:
+  - id: local-tools
+    status: active
+    source: "/Users/jayden.csai/.salvage/local-tools-mcp.js"
+    description: "Structured wrappers for selected local CLI tools."
+
+repos:
+  - id: clawd
+    status: active
+    repo_path: "/Users/jayden.csai/clawd"
+    role: "shared agent infrastructure home"
+
+  - id: mgc-translation-workflow
+    status: active
+    repo_path: "/Users/jayden.csai/Developer/mgc-translation-workflow"
+    github:
+      - "jaydenbarnescs-tech/mgc-translation-workflow"
+    role: "translation workflow system"
+
+services: []
+workflows: []
+archives: []

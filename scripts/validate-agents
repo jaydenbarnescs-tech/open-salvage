@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="/Users/jayden.csai/clawd"
+REGISTRY="$ROOT/config/agents/registry.yaml"
+
+if [ ! -f "$REGISTRY" ]; then
+  echo "Registry missing: $REGISTRY" >&2
+  exit 1
+fi
+
+echo "Found registry: $REGISTRY"
+echo "Basic validation passed."
+echo "TODO: add YAML/schema validation, path existence checks, and collision checks."

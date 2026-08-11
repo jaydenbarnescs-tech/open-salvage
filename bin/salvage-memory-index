@@ -20,6 +20,7 @@ const OVERLAP_CHARS = 280;
 const EMBED_MODEL = 'bge-m3';
 const EMBED_DIMS = 1024;
 const OLLAMA_URL = 'http://localhost:11434';
+const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || '5m';
 
 function log(msg) { process.stderr.write(`[memory-index] ${new Date().toISOString()} ${msg}\n`); }
 
@@ -105,7 +106,7 @@ function needsReindex(filePath, contentHash) {
 // Get embedding from Ollama
 function getEmbedding(text) {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ model: EMBED_MODEL, prompt: text });
+    const body = JSON.stringify({ model: EMBED_MODEL, prompt: text, keep_alive: OLLAMA_KEEP_ALIVE });
     const req = http.request(`${OLLAMA_URL}/api/embeddings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },

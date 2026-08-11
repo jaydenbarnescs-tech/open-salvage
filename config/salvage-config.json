@@ -1,5 +1,15 @@
 {
   "version": "2.0",
+  "model": "claude-sonnet-4-6",
+  "backgroundTasks": {
+    "enabled": false,
+    "allowLocalModels": false
+  },
+  "ollama": {
+    "policy": "explicit-only",
+    "keepAlive": "5m",
+    "allowedBackgroundModels": ["bge-m3"]
+  },
   "skills": {
     "alwaysInject": ["mgc-context"]
   },

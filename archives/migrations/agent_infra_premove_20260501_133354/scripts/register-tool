@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Register-tool scaffolding only."
+echo "Planned behavior:"
+echo "- append a draft tool entry to config/agents/registry.yaml"
+echo "- require id, path/command, aliases, use_when, risk level, and status"

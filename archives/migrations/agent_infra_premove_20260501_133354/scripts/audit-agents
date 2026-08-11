@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Audit scaffolding only."
+echo "Planned checks:"
+echo "- unregistered ~/bin tools"
+echo "- unregistered repos"
+echo "- MCP server drift between canonical registry and live configs"
+echo "- docs that mention systems not present in registry"

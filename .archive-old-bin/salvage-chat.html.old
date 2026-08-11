@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenSalvage Chat</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f0f0f; color: #e8e8e8; height: 100vh; display: flex; overflow: hidden; }
+
+  /* ── Sidebar ── */
+  #sidebar { width: 220px; min-width: 220px; background: #141414; border-right: 1px solid #222; display: flex; flex-direction: column; }
+  #sidebar-top { padding: 12px 10px 8px; border-bottom: 1px solid #1e1e1e; }
+  #new-btn { width: 100%; background: #1e1e1e; border: 1px solid #2a2a2a; color: #ccc; padding: 8px 12px; border-radius: 8px; cursor: pointer; font-size: 13px; text-align: left; display: flex; align-items: center; gap: 8px; }
+  #new-btn:hover { background: #252525; color: #fff; }
+  #session-list { flex: 1; overflow-y: auto; padding: 6px; display: flex; flex-direction: column; gap: 2px; }
+  .session-item { padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; color: #999; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; justify-content: space-between; gap: 4px; }
+  .session-item:hover { background: #1e1e1e; color: #ddd; }
+  .session-item.active { background: #1d3557; color: #fff; }
+  .session-item .del { opacity: 0; font-size: 11px; color: #666; padding: 0 2px; flex-shrink: 0; }
+  .session-item:hover .del { opacity: 1; }
+  .session-item .del:hover { color: #f87171; }
+  #sidebar-bottom { padding: 10px; border-top: 1px solid #1e1e1e; }
+  #model-select { width: 100%; background: #1a1a1a; border: 1px solid #2a2a2a; color: #999; padding: 6px 8px; border-radius: 6px; font-size: 12px; cursor: pointer; }
+
+  /* ── Main ── */
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #header { padding: 12px 20px; border-bottom: 1px solid #1e1e1e; background: #141414; display: flex; align-items: center; }
+  #session-title { font-size: 14px; font-weight: 500; color: #ccc; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  #messages { flex: 1; overflow-y: auto; padding: 24px 20px; display: flex; flex-direction: column; gap: 18px; }
+  .msg { max-width: 700px; line-height: 1.65; font-size: 14px; }
+  .msg.user { align-self: flex-end; background: #1d3557; padding: 10px 14px; border-radius: 12px 12px 2px 12px; color: #e8e8e8; white-space: pre-wrap; }
+  .msg.assistant { align-self: flex-start; white-space: pre-wrap; color: #d4d4d4; }
+  .msg.system-note { align-self: center; color: #444; font-size: 12px; font-style: italic; }
+
+  /* ── Thinking panel ── */
+  .thinking-wrap { align-self: flex-start; max-width: 700px; margin-bottom: -10px; }
+  .thinking-toggle { display: flex; align-items: center; gap: 6px; background: none; border: none; color: #555; font-size: 12px; cursor: pointer; padding: 2px 0; font-family: inherit; }
+  .thinking-toggle:hover { color: #888; }
+  .thinking-toggle .chevron { display: inline-block; transition: transform 0.2s; font-size: 10px; }
+  .thinking-toggle.open .chevron { transform: rotate(90deg); }
+  .thinking-body { display: none; margin-top: 6px; background: #161616; border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px 14px; font-size: 12px; color: #666; white-space: pre-wrap; line-height: 1.6; max-height: 300px; overflow-y: auto; }
+  .thinking-body.open { display: block; }
+  .thinking-pulse { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #555; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 0.3; } 50% { opacity: 1; } }
+  .msg-img { max-width: 260px; max-height: 200px; border-radius: 8px; margin-top: 6px; display: block; }
+  .msg-file { display: inline-flex; align-items: center; gap: 6px; background: #1a2a3a; border: 1px solid #2a3a4a; border-radius: 6px; padding: 5px 10px; font-size: 12px; color: #7eb8d4; margin-top: 6px; }
+
+  /* ── Input area ── */
+  #input-area { border-top: 1px solid #1e1e1e; background: #141414; padding: 10px 16px 14px; }
+
+  /* Attachment previews */
+  #attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .attach-thumb { position: relative; display: inline-flex; align-items: center; }
+  .attach-thumb img { width: 56px; height: 56px; object-fit: cover; border-radius: 6px; border: 1px solid #2a2a2a; }
+  .attach-thumb .file-chip { display: flex; align-items: center; gap: 6px; background: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 6px; padding: 6px 10px; font-size: 12px; color: #aaa; max-width: 180px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .attach-thumb .file-chip .file-icon { font-size: 16px; flex-shrink: 0; }
+  .attach-remove { position: absolute; top: -5px; right: -5px; width: 16px; height: 16px; border-radius: 50%; background: #444; border: none; color: #fff; font-size: 10px; cursor: pointer; display: flex; align-items: center; justify-content: center; line-height: 1; }
+  .attach-remove:hover { background: #f87171; }
+
+  #input-row { display: flex; gap: 8px; align-items: flex-end; }
+  #attach-btn { background: none; border: none; color: #555; font-size: 20px; cursor: pointer; padding: 6px 4px; flex-shrink: 0; line-height: 1; }
+  #attach-btn:hover { color: #aaa; }
+  #input { flex: 1; background: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 10px; padding: 10px 14px; color: #e8e8e8; font-size: 14px; resize: none; height: 44px; max-height: 160px; overflow-y: auto; outline: none; font-family: inherit; }
+  #input:focus { border-color: #444; }
+  #send { background: #2563eb; border: none; color: #fff; padding: 0 18px; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 500; height: 44px; white-space: nowrap; flex-shrink: 0; }
+  #send:disabled { background: #1e1e1e; color: #444; cursor: not-allowed; }
+  #send:hover:not(:disabled) { background: #1d4ed8; }
+  #file-input { display: none; }
+
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #444; border-top-color: #888; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <div id="sidebar-top">
+    <button id="new-btn">＋ &nbsp;New session</button>
+  </div>
+  <div id="session-list"></div>
+  <div id="sidebar-bottom">
+    <select id="model-select">
+      <option value="ollama/gemma4:latest">Gemma 4 (local)</option>
+      <option value="mgc-proxy/claude-haiku-4-5-20251001">Haiku 4.5</option>
+      <option value="mgc-proxy/claude-sonnet-4-20250514">Sonnet 4</option>
+      <option value="mgc-proxy/claude-opus-4-20250514">Opus 4</option>
+    </select>
+  </div>
+</div>
+
+<div id="main">
+  <div id="header">
+    <span id="session-title">OpenSalvage</span>
+  </div>
+  <div id="messages"></div>
+  <div id="input-area">
+    <div id="attachments"></div>
+    <div id="input-row">
+      <button id="attach-btn" title="Attach file or image">⊕</button>
+      <input type="file" id="file-input" multiple accept="image/*,text/*,.pdf,.md,.json,.csv,.js,.ts,.py,.sh,.yaml,.yml,.toml,.xml,.html,.css,.txt,.log">
+      <textarea id="input" placeholder="Message OpenSalvage… (Enter to send, Shift+Enter for newline)"></textarea>
+      <button id="send">Send</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const BRIDGE = 'http://localhost:18790/v1/chat/completions';
+const STORE_KEY = 'opensalvage_sessions';
+
+// ── Storage ──────────────────────────────────────────────────────────────
+function loadSessions() {
+  try { return JSON.parse(localStorage.getItem(STORE_KEY) || '{}'); } catch { return {}; }
+}
+function saveSessions(s) { localStorage.setItem(STORE_KEY, JSON.stringify(s)); }
+function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+
+// ── State ─────────────────────────────────────────────────────────────────
+let sessions = loadSessions();
+let activeId = null;
+let pendingAttachments = []; // [{ type:'image'|'file', name, dataUrl, text, mimeType }]
+
+// ── DOM ───────────────────────────────────────────────────────────────────
+const sessionListEl = document.getElementById('session-list');
+const messagesEl = document.getElementById('messages');
+const inputEl = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const modelEl = document.getElementById('model-select');
+const titleEl = document.getElementById('session-title');
+const attachmentsEl = document.getElementById('attachments');
+const fileInputEl = document.getElementById('file-input');
+
+// ── Sessions ──────────────────────────────────────────────────────────────
+function newSession() {
+  const id = genId();
+  sessions[id] = { id, title: 'New session', history: [], createdAt: Date.now() };
+  saveSessions(sessions);
+  switchSession(id);
+  renderSidebar();
+}
+
+function deleteSession(id) {
+  delete sessions[id];
+  saveSessions(sessions);
+  const ids = sortedIds();
+  if (activeId === id) {
+    if (ids.length) switchSession(ids[0]);
+    else { activeId = null; clearMessages(); titleEl.textContent = 'OpenSalvage'; }
+  }
+  renderSidebar();
+}
+
+function switchSession(id) {
+  activeId = id;
+  clearMessages();
+  pendingAttachments = [];
+  renderAttachments();
+  const s = sessions[id];
+  titleEl.textContent = s.title;
+  if (s.history.length === 0) addSystemNote('Start chatting — attach files with ⊕');
+  else s.history.forEach(m => renderHistoryMsg(m));
+  renderSidebar();
+  inputEl.focus();
+}
+
+function sortedIds() {
+  return Object.keys(sessions).sort((a, b) => (sessions[b].createdAt || 0) - (sessions[a].createdAt || 0));
+}
+
+function renderSidebar() {
+  sessionListEl.innerHTML = '';
+  const ids = sortedIds();
+  if (!ids.length) {
+    sessionListEl.innerHTML = '<div style="padding:10px;font-size:12px;color:#444;text-align:center;">No sessions yet</div>';
+    return;
+  }
+  ids.forEach(id => {
+    const s = sessions[id];
+    const item = document.createElement('div');
+    item.className = 'session-item' + (id === activeId ? ' active' : '');
+    item.title = s.title;
+    const label = document.createElement('span');
+    label.textContent = s.title;
+    label.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1';
+    const del = document.createElement('span');
+    del.className = 'del';
+    del.textContent = '✕';
+    del.title = 'Delete';
+    del.addEventListener('click', e => { e.stopPropagation(); deleteSession(id); });
+    item.appendChild(label);
+    item.appendChild(del);
+    item.addEventListener('click', () => switchSession(id));
+    sessionListEl.appendChild(item);
+  });
+}
+
+// ── Messages ──────────────────────────────────────────────────────────────
+function clearMessages() { messagesEl.innerHTML = ''; }
+
+function addSystemNote(text) {
+  const div = document.createElement('div');
+  div.className = 'msg system-note';
+  div.textContent = text;
+  messagesEl.appendChild(div);
+}
+
+// Render a stored history message (which may have rich content)
+function renderHistoryMsg(msg) {
+  const div = document.createElement('div');
+  div.className = `msg ${msg.role}`;
+
+  if (typeof msg.content === 'string') {
+    div.textContent = msg.content;
+  } else if (Array.isArray(msg.content)) {
+    msg.content.forEach(part => {
+      if (part.type === 'text' && part.text) {
+        const t = document.createElement('div');
+        t.style.whiteSpace = 'pre-wrap';
+        t.textContent = part.text;
+        div.appendChild(t);
+      } else if (part.type === 'image_url') {
+        const img = document.createElement('img');
+        img.src = part.image_url.url;
+        img.className = 'msg-img';
+        div.appendChild(img);
+      } else if (part.type === '_file') {
+        const chip = document.createElement('div');
+        chip.className = 'msg-file';
+        chip.textContent = `📄 ${part.name}`;
+        div.appendChild(chip);
+      }
+    });
+  }
+
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return div;
+}
+
+// ── Attachments ───────────────────────────────────────────────────────────
+function renderAttachments() {
+  attachmentsEl.innerHTML = '';
+  pendingAttachments.forEach((att, i) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'attach-thumb';
+
+    if (att.type === 'image') {
+      const img = document.createElement('img');
+      img.src = att.dataUrl;
+      img.title = att.name;
+      wrap.appendChild(img);
+    } else {
+      const chip = document.createElement('div');
+      chip.className = 'file-chip';
+      chip.innerHTML = `<span class="file-icon">${fileIcon(att.name)}</span><span>${att.name}</span>`;
+      wrap.appendChild(chip);
+    }
+
+    const rm = document.createElement('button');
+    rm.className = 'attach-remove';
+    rm.textContent = '×';
+    rm.title = 'Remove';
+    rm.addEventListener('click', () => {
+      pendingAttachments.splice(i, 1);
+      renderAttachments();
+    });
+    wrap.appendChild(rm);
+    attachmentsEl.appendChild(wrap);
+  });
+}
+
+function fileIcon(name) {
+  const ext = name.split('.').pop().toLowerCase();
+  const icons = { pdf: '📄', js: '📜', ts: '📜', py: '🐍', sh: '⚙️', json: '{}', csv: '📊', md: '📝', html: '🌐', css: '🎨', png: '🖼️', jpg: '🖼️', jpeg: '🖼️', gif: '🖼️', svg: '🖼️' };
+  return icons[ext] || '📄';
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => resolve(e.target.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function readFileAsText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => resolve(e.target.result);
+    reader.onerror = reject;
+    reader.readAsText(file);
+  });
+}
+
+async function handleFiles(files) {
+  for (const file of files) {
+    const isImage = file.type.startsWith('image/');
+    if (isImage) {
+      const dataUrl = await readFileAsDataUrl(file);
+      pendingAttachments.push({ type: 'image', name: file.name, dataUrl, mimeType: file.type });
+    } else {
+      // Read as text (covers .txt, .md, .json, .csv, .js, .ts, .py, .sh, etc.)
+      try {
+        const text = await readFileAsText(file);
+        pendingAttachments.push({ type: 'file', name: file.name, text, mimeType: file.type });
+      } catch {
+        pendingAttachments.push({ type: 'file', name: file.name, text: `[Could not read file: ${file.name}]`, mimeType: file.type });
+      }
+    }
+  }
+  renderAttachments();
+}
+
+// Drag-and-drop on messages area
+messagesEl.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+messagesEl.addEventListener('drop', e => {
+  e.preventDefault();
+  if (e.dataTransfer.files.length) handleFiles(Array.from(e.dataTransfer.files));
+});
+
+// ── Build message content for API ─────────────────────────────────────────
+function buildUserContent(text, attachments) {
+  if (!attachments.length) return text || '';
+
+  const parts = [];
+
+  // Prepend text files as quoted blocks in a single text part
+  const fileBlocks = attachments.filter(a => a.type === 'file').map(a =>
+    `<file name="${a.name}">\n${a.text}\n</file>`
+  );
+
+  const fullText = [...fileBlocks, text].filter(Boolean).join('\n\n');
+  if (fullText) parts.push({ type: 'text', text: fullText });
+
+  // Images as image_url parts
+  attachments.filter(a => a.type === 'image').forEach(a => {
+    parts.push({ type: 'image_url', image_url: { url: a.dataUrl } });
+    // Tag for rendering in history
+    parts.push({ type: '_file', name: a.name });
+  });
+
+  return parts.length === 1 && parts[0].type === 'text' ? parts[0].text : parts;
+}
+
+// For display: build user message bubble content
+function buildDisplayContent(text, attachments) {
+  const parts = [];
+  if (text) parts.push({ type: 'text', text });
+  attachments.forEach(a => {
+    if (a.type === 'image') parts.push({ type: 'image_url', image_url: { url: a.dataUrl } }, { type: '_file', name: a.name });
+    else parts.push({ type: '_file', name: a.name });
+  });
+  return parts.length === 1 && parts[0].type === 'text' ? text : parts;
+}
+
+// ── Thinking panel ───────────────────────────────────────────────────────
+function renderThinking(text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'thinking-wrap';
+
+  const toggle = document.createElement('button');
+  toggle.className = 'thinking-toggle';
+  toggle.innerHTML = '<span class="chevron">▶</span> Thought for a moment';
+
+  const body = document.createElement('div');
+  body.className = 'thinking-body';
+  body.textContent = text;
+
+  toggle.addEventListener('click', () => {
+    const open = body.classList.toggle('open');
+    toggle.classList.toggle('open', open);
+  });
+
+  wrap.appendChild(toggle);
+  wrap.appendChild(body);
+  messagesEl.appendChild(wrap);
+}
+
+// ── Send ──────────────────────────────────────────────────────────────────
+function setLoading(on) {
+  sendBtn.disabled = on;
+  sendBtn.innerHTML = on ? '<span class="spinner"></span>' : 'Send';
+}
+
+async function send() {
+  const text = inputEl.value.trim();
+  if (!text && !pendingAttachments.length) return;
+  if (!activeId) return;
+
+  const atts = [...pendingAttachments];
+  inputEl.value = '';
+  inputEl.style.height = '44px';
+  pendingAttachments = [];
+  renderAttachments();
+
+  const s = sessions[activeId];
+  const apiContent = buildUserContent(text, atts);
+  const displayContent = buildDisplayContent(text, atts);
+
+  // Store display version in history (avoids storing huge base64 twice)
+  s.history.push({ role: 'user', content: displayContent });
+
+  // Auto-title
+  if (s.history.filter(m => m.role === 'user').length === 1) {
+    const firstText = text || (atts[0]?.name ? `[${atts[0].name}]` : 'New session');
+    s.title = firstText.slice(0, 40) + (firstText.length > 40 ? '…' : '');
+    titleEl.textContent = s.title;
+    renderSidebar();
+  }
+
+  clearMessages();
+  s.history.forEach(m => renderHistoryMsg(m));
+
+  // Build API messages (use apiContent for last user message)
+  const apiMessages = [
+    ...s.history.slice(0, -1),
+    { role: 'user', content: apiContent },
+  ];
+
+  setLoading(true);
+  const loadingEl = document.createElement('div');
+  loadingEl.className = 'msg assistant';
+  loadingEl.innerHTML = '<span class="spinner"></span>';
+  messagesEl.appendChild(loadingEl);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+
+  try {
+    const res = await fetch(BRIDGE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer salvage' },
+      body: JSON.stringify({ messages: apiMessages, model: modelEl.value || undefined }),
+    });
+    if (!res.ok) throw new Error(`Bridge error ${res.status}`);
+    const data = await res.json();
+    const reply = data.choices?.[0]?.message?.content || '(no response)';
+    const thinking = data.thinking || '';
+
+    // Replace spinner with thinking panel + answer
+    loadingEl.remove();
+    if (thinking) renderThinking(thinking);
+    const answerEl = document.createElement('div');
+    answerEl.className = 'msg assistant';
+    answerEl.textContent = reply;
+    messagesEl.appendChild(answerEl);
+
+    s.history.push({ role: 'assistant', content: reply });
+    saveSessions(sessions);
+  } catch (err) {
+    loadingEl.className = 'msg system-note';
+    loadingEl.textContent = `Error: ${err.message}`;
+  } finally {
+    setLoading(false);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    inputEl.focus();
+  }
+}
+
+// ── Events ────────────────────────────────────────────────────────────────
+document.getElementById('new-btn').addEventListener('click', newSession);
+document.getElementById('attach-btn').addEventListener('click', () => fileInputEl.click());
+fileInputEl.addEventListener('change', () => {
+  if (fileInputEl.files.length) handleFiles(Array.from(fileInputEl.files));
+  fileInputEl.value = '';
+});
+sendBtn.addEventListener('click', send);
+inputEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+inputEl.addEventListener('input', () => {
+  inputEl.style.height = '44px';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+});
+document.getElementById('clear-btn-noop'); // placeholder
+
+// ── Init ──────────────────────────────────────────────────────────────────
+renderSidebar();
+const ids = sortedIds();
+if (ids.length) switchSession(ids[0]);
+else newSession();
+</script>
+</body>
+</html>

@@ -129,7 +129,13 @@ function cmdAdd(name, args) {
   // Build salvage command
   const cmdArgs = [SALVAGE_BIN, '--task', task];
   if (workspace) cmdArgs.push('--workspace', workspace);
-  cmdArgs.push('--fresh', ...salvageArgs);
+  // Ensure bare prompt strings (no leading dash) are prefixed with -p.
+  // Without -p, Claude CLI treats the prompt text as an MCP config path.
+  const hasPromptFlag = salvageArgs.includes('-p') || salvageArgs.includes('--prompt');
+  const normalizedSalvageArgs = hasPromptFlag ? salvageArgs : salvageArgs.flatMap(a =>
+    a.startsWith('-') ? [a] : ['-p', a]
+  );
+  cmdArgs.push('--fresh', ...normalizedSalvageArgs);
 
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

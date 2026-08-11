@@ -24,6 +24,7 @@ for (let i = 4; i < process.argv.length; i++) {
 const DB_PATH = path.join(WORKSPACE, 'sessions', 'memory.db');
 const EMBED_MODEL = 'bge-m3';
 const OLLAMA_URL = 'http://localhost:11434';
+const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || '5m';
 const VECTOR_WEIGHT = 0.7;
 const TEXT_WEIGHT = 0.3;
 
@@ -33,7 +34,7 @@ function sql(query) {
 
 function getEmbedding(text) {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ model: EMBED_MODEL, prompt: text });
+    const body = JSON.stringify({ model: EMBED_MODEL, prompt: text, keep_alive: OLLAMA_KEEP_ALIVE });
     const req = http.request(`${OLLAMA_URL}/api/embeddings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },

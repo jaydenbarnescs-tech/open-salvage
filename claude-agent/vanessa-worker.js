@@ -39,6 +39,15 @@ const PID_FILE         = "/tmp/vanessa-worker.pid";
 const SALVAGE        = path.join(process.env.HOME, "bin", "salvage");
 const WORKSPACE        = path.join(process.env.HOME, "clawd");
 
+// ── Pluggable backend ────────────────────────────────────────────────────────
+// Vanessa is NOT tied to salvage. Default backend stays `salvage` (legacy), but
+// set VANESSA_HANDLER to any executable to route messages through a different
+// bot. In the default "simple" mode the handler is invoked as
+// `VANESSA_HANDLER <prompt>` and whatever it prints to stdout is posted back to
+// Slack verbatim. See ~/claude-agent/VANESSA.md.
+const HANDLER        = process.env.VANESSA_HANDLER || SALVAGE;
+const HANDLER_MODE   = process.env.VANESSA_HANDLER ? (process.env.VANESSA_HANDLER_MODE || "simple") : "salvage";
+
 const JAYDEN_DM_CHAN   = "D0AQW7VF4UA";
 const JAYDEN_USER_ID   = "U0AM9DC9SJW";
 const MATSUO_USER_ID   = "U09DR063A59";
@@ -50,6 +59,7 @@ const POLL_MS          = 2_000;     // idle poll interval
 const STALL_MINUTES    = 30;        // claimed_at older than this → recover (jobs can run up to 30 min)
 const MODEL_SONNET     = "claude-sonnet-4-6";
 const MODEL_HAIKU      = "claude-haiku-4-5-20251001";
+const MODEL_GEMMA      = "gemma4:latest";   // local Ollama — no Claude quota needed
 const MAX_TURNS        = 25;  // 50 caused session rate-limit spikes (Claude Code rolling window)
 
 // Claude Code session files directory — watched for JSONL activity (heartbeat)
@@ -244,7 +254,7 @@ const COMPLEX_PATTERNS = [
 ];
 
 function selectModel(text) {
-  return MODEL_SONNET;
+  return MODEL_GEMMA;
 }
 
 // ── API error patterns (checked against stream-json result text) ──────────
@@ -266,7 +276,35 @@ const API_ERROR_PATTERNS = [
 // Resolves as soon as we see {"type":"result","subtype":"success"} — we kill
 // salvage immediately and return the text. No double-posting: the prompt
 // tells Vanessa not to post via tools; the worker handles all Slack posting.
-function runSalvage(prompt, sessionKey, model) {
+// Generic backend: call HANDLER with the prompt as an argument and post its
+// stdout to Slack verbatim. This is what lets a non-salvage bot be plugged in
+// via VANESSA_HANDLER (mode "simple", the default whenever VANESSA_HANDLER set).
+function runSimpleHandler(prompt, sessionKey) {
+  return new Promise((resolve, reject) => {
+    const env = {
+      ...process.env,
+      HOME: process.env.HOME,
+      PATH: `${process.env.HOME}/bin:/opt/homebrew/opt/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`,
+      VANESSA_SESSION_KEY: sessionKey || "",
+    };
+    const child = spawn(HANDLER, [prompt], { stdio: ["ignore", "pipe", "pipe"], env });
+    currentChild = child;
+    let out = "", err = "";
+    const killer = setTimeout(() => { try { child.kill("SIGTERM"); } catch {} }, MAX_MS);
+    child.stdout.on("data", d => { out += d.toString(); });
+    child.stderr.on("data", d => { err += d.toString(); });
+    child.on("error", e => { clearTimeout(killer); currentChild = null; reject(e); });
+    child.on("close", code => {
+      clearTimeout(killer); currentChild = null;
+      if (code === 0 && out.trim()) resolve(out.trim());
+      else reject(new Error(`handler exited ${code}: ${(err || out).slice(0, 300)}`));
+    });
+  });
+}
+
+function runSalvage(prompt, sessionKey, model, threadTs) {
+  // Non-salvage backend: delegate to the generic handler.
+  if (HANDLER_MODE === "simple") return runSimpleHandler(prompt, sessionKey);
   return new Promise((resolve, reject) => {
     const args = [
       "--workspace", WORKSPACE,
@@ -280,6 +318,7 @@ function runSalvage(prompt, sessionKey, model) {
       "--verbose",
       "--dangerously-skip-permissions",
     ];
+    if (threadTs) args.push("--thread-ts", threadTs);
 
     const env = {
       ...process.env,
@@ -287,7 +326,7 @@ function runSalvage(prompt, sessionKey, model) {
       PATH: `${process.env.HOME}/bin:/opt/homebrew/opt/node/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`,
     };
 
-    const child = spawn(SALVAGE, args, {
+    const child = spawn(HANDLER, args, {
       stdio: ["ignore", "pipe", "pipe"],
       env,
     });
@@ -296,6 +335,7 @@ function runSalvage(prompt, sessionKey, model) {
     let stderr      = "";
     let stdoutBuf   = "";        // partial line buffer for stream-json parsing
     let resultText  = null;      // set when we get a successful result event
+    let sentProgressUpdates = 0; // set when Gemma sent mid-task Slack updates
     let lastActivity = Date.now();
     let settled     = false;
 
@@ -368,6 +408,8 @@ function runSalvage(prompt, sessionKey, model) {
                 }
               }
               resultText = text;
+              sentProgressUpdates = typeof event.sentProgressUpdates === "number"
+                ? event.sentProgressUpdates : 0;
               // Layer 1 fix: do NOT kill the child process here.
               // Salvage calls updateSessionState() at the end of its own main().
               // If we kill it now, updateSessionState never runs, state.json never
@@ -375,7 +417,7 @@ function runSalvage(prompt, sessionKey, model) {
               // Instead: resolve immediately so Slack posting can begin, but let
               // salvage exit naturally. The staleChecker / absoluteTimer will
               // kill it if it somehow hangs after this point.
-              settle(text);
+              settle({ text, sentProgressUpdates });
             } else {
               // error_max_turns, error_during_execution, etc.
               // If Claude managed to write partial text, surface it rather than failing.
@@ -384,7 +426,7 @@ function runSalvage(prompt, sessionKey, model) {
                 // For error subtypes we still want to let salvage clean up
                 // naturally, but we do kill to avoid lingering on broken state.
                 killChild();
-                settle(text);
+                settle({ text, sentProgressUpdates: 0 });
               } else {
                 killChild();
                 settle(new Error(`Salvage result error: ${event.subtype}`));
@@ -400,6 +442,8 @@ function runSalvage(prompt, sessionKey, model) {
     child.stderr.on("data", d => {
       lastActivity = Date.now(); // stderr activity also counts as alive
       stderr += d;
+      // Debug: mirror salvage stderr to a log file so we can see callLLM internals
+      try { fs.appendFileSync(path.join(process.env.HOME, "claude-agent/logs/salvage-debug.log"), d); } catch {}
     });
 
     // ── Cleanup on process exit ───────────────────────────────────────────
@@ -413,7 +457,7 @@ function runSalvage(prompt, sessionKey, model) {
 
       // Process exited before we saw a result event
       if (resultText !== null) {
-        settle(resultText); // safety net
+        settle({ text: resultText, sentProgressUpdates }); // safety net
       } else if (code !== 0) {
         settle(new Error(`Salvage exited code ${code}: ${(stderr || "").slice(0, 300)}`));
       } else {
@@ -705,7 +749,10 @@ async function processJob(job) {
   }
 
   try {
-    const response = await runSalvage(prompt, sessionKey, model);
+    // runSalvage() is the single entry point for all models.
+    // Salvage detects the model internally and routes to callOllama() or callClaude().
+    const { text: responseText, sentProgressUpdates: progressCount } =
+      await runSalvage(prompt, sessionKey, model, thread_ts || null);
 
     // 👀 → ✅
     if (reactionTs) {
@@ -713,7 +760,10 @@ async function processJob(job) {
       await addReaction(channel, reactionTs, "white_check_mark");
     }
 
-    const chunks = chunkMessage(response);
+    // If Gemma sent mid-task Slack progress updates, the final_answer is a brief
+    // completion summary — post it as-is. If she didn't send any updates, post normally.
+    // Either way we post the final text, but log the distinction for observability.
+    const chunks = chunkMessage(responseText);
     for (const chunk of chunks) {
       const text = message_type === "hisho"
         ? chunk + "\n\n_※ AIアシスタント（Vanessa）による代理返信です。Jaydenが確認次第、補足・訂正する場合があります。_"
@@ -727,7 +777,7 @@ async function processJob(job) {
       setTimeout(() => removeReaction(channel, reactionTs, "white_check_mark"), 5_000);
     }
 
-    log("info", "job done", { id, chunks: chunks.length, len: response.length, model });
+    log("info", "job done", { id, chunks: chunks.length, len: responseText.length, model, progressUpdates: progressCount });
 
     // Layer 5: Post-turn memory enforcement — runs fully async after response is posted.
     // If Vanessa was supposed to call vanessa-memory-update but didn't, the worker does it.

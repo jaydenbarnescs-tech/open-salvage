@@ -26,9 +26,20 @@ const fs = require('fs');
 const path = require('path');
 
 const HOME = process.env.HOME || '/Users/jayden.csai';
-const SALVAGE   = path.join(HOME, 'bin/salvage');
+const SALVAGE     = path.join(HOME, 'bin/salvage');
+const SALVAGE_LLM = path.join(HOME, 'bin/salvage-llm');
 const MEM0_PYTHON = path.join(HOME, 'claude-agent/mem0-env/bin/python');
 const MEM0_DIR    = path.join(HOME, 'claude-agent/mem0');
+const CONFIG_FILE = path.join(HOME, 'clawd/config/salvage-config.json');
+
+function getModelFromConfig() {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+    return cfg.model || 'claude-sonnet-4-6';
+  } catch { return 'claude-sonnet-4-6'; }
+}
+const SALVAGE_MODEL = getModelFromConfig();
+const IS_CLAUDE_MODEL = /^claude[-\s]|^(sonnet|opus|haiku)/i.test(SALVAGE_MODEL);
 
 function getStandingInstructions() {
   try {
@@ -108,24 +119,35 @@ function runSubAgent(task) {
     const standingInstructions = getStandingInstructions();
     const prompt = `${standingInstructions ? '## Active Standing Instructions (from Vanessa\'s memory)\n' + standingInstructions + '\n\n---\n\n' : ''}${systemSuffix}\n\nTask: ${task.instruction}`;
 
-    const args = [
-      '--workspace', path.resolve(WORKSPACE),
-      '--task', 'general',
-      '--fresh',
-      '--minimal',
-      '--no-live-state',
-      '--no-memory',
-      '--no-mcp',
-      '-p', prompt,
-      '--model', 'claude-sonnet-4-6',
-      '--max-turns', '10',
-      '--output-format', 'text',
-      '--dangerously-skip-permissions',
-    ];
+    let bin, args;
+    if (IS_CLAUDE_MODEL) {
+      bin = SALVAGE;
+      args = [
+        '--workspace', path.resolve(WORKSPACE),
+        '--task', 'general',
+        '--fresh',
+        '--minimal',
+        '--no-live-state',
+        '--no-memory',
+        '--no-mcp',
+        '-p', prompt,
+        '--model', SALVAGE_MODEL,
+        '--max-turns', '10',
+        '--output-format', 'text',
+        '--dangerously-skip-permissions',
+      ];
+    } else {
+      bin = SALVAGE_LLM;
+      args = [
+        '--model', SALVAGE_MODEL,
+        '--workspace', path.resolve(WORKSPACE),
+        '-p', prompt,
+      ];
+    }
 
-    log(`Starting sub-agent: ${taskId} — ${task.instruction.slice(0, 80)}`);
+    log(`Starting sub-agent: ${taskId} (model=${SALVAGE_MODEL}) — ${task.instruction.slice(0, 80)}`);
 
-    const child = spawn(SALVAGE, args, {
+    const child = spawn(bin, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         ...process.env,

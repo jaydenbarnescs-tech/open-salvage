@@ -1,0 +1,300 @@
+#!/opt/homebrew/bin/node
+'use strict';
+// salvage-chatbox-bridge — OpenAI-compatible HTTP bridge for OpenSalvage chat UI
+// Text-only messages → salvage CLI (full workspace context)
+// Messages with images → mgc-proxy Anthropic API (vision support)
+
+const http = require('http');
+const path = require('path');
+const { spawn } = require('child_process');
+
+const HOME = process.env.HOME || '/Users/jayden.csai';
+const DEFAULT_WORKSPACE = path.join(HOME, 'clawd');
+const SALVAGE = path.join(HOME, 'bin/salvage');
+const OLLAMA_URL = 'http://localhost:11434';
+
+// ── Parse CLI args ────────────────────────────────────────────────────────
+const argv = process.argv.slice(2);
+let PORT = 18790;
+let WORKSPACE = DEFAULT_WORKSPACE;
+for (let i = 0; i < argv.length; i++) {
+  if (argv[i] === '--port') PORT = parseInt(argv[++i], 10);
+  if (argv[i] === '--workspace') WORKSPACE = argv[++i];
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+function jsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', () => {
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+      catch (e) { reject(e); }
+    });
+    req.on('error', reject);
+  });
+}
+
+function openaiError(res, status, message) {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: { message, type: 'bridge_error', code: status } }));
+}
+
+function makeCompletion(content, model, thinking) {
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    id: `chatcmpl-salvage-${now}`,
+    object: 'chat.completion',
+    created: now,
+    model: model || 'salvage',
+    choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    ...(thinking ? { thinking } : {}),
+  };
+}
+
+// ── Content helpers ───────────────────────────────────────────────────────
+
+// Check if any message contains image content
+function hasImages(messages) {
+  return messages.some(m =>
+    Array.isArray(m.content) && m.content.some(p => p.type === 'image_url')
+  );
+}
+
+// Extract plain text from a content value (string or array)
+function contentText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.filter(p => p.type === 'text').map(p => p.text).join('\n');
+  }
+  return String(content || '');
+}
+
+// Format full history as a single salvage prompt (text-only path)
+function formatForSalvage(messages) {
+  if (messages.length === 1 && messages[0].role === 'user') {
+    return contentText(messages[0].content);
+  }
+  const lines = [];
+  for (const msg of messages) {
+    const role = msg.role === 'assistant' ? 'Assistant' : msg.role === 'system' ? 'System' : 'User';
+    const text = contentText(msg.content);
+    if (text.trim()) lines.push(`[${role}]\n${text}`);
+  }
+  lines.push('\nRespond to the last [User] message above. Continue naturally without restating the conversation.');
+  return lines.join('\n\n');
+}
+
+// Convert OpenAI message content → Anthropic content blocks
+function toAnthropicContent(content) {
+  if (typeof content === 'string') return [{ type: 'text', text: content }];
+  if (!Array.isArray(content)) return [{ type: 'text', text: String(content) }];
+
+  return content.map(part => {
+    if (part.type === 'text') return { type: 'text', text: part.text };
+    if (part.type === 'image_url') {
+      const url = part.image_url?.url || '';
+      if (url.startsWith('data:')) {
+        const [meta, data] = url.split(',');
+        const mediaType = meta.replace('data:', '').replace(';base64', '') || 'image/jpeg';
+        return { type: 'image', source: { type: 'base64', media_type: mediaType, data } };
+      }
+      // URL-based image (non-base64)
+      return { type: 'image', source: { type: 'url', url } };
+    }
+    return { type: 'text', text: JSON.stringify(part) };
+  });
+}
+
+// ── Salvage (text-only) ───────────────────────────────────────────────────
+function resolveSalvageModel(model) {
+  if (!model || model === 'default' || model === 'salvage') return null;
+  if (model.startsWith('mgc-proxy/')) return model.slice('mgc-proxy/'.length);
+  return model;
+}
+
+function runSalvage(prompt, model) {
+  return new Promise((resolve, reject) => {
+    const salvageModel = resolveSalvageModel(model);
+    const args = [
+      '--workspace', WORKSPACE,
+      '--task', 'general',
+      '--fresh',
+      '--minimal',
+      '--no-live-state',
+      '--no-memory',
+      '--no-mcp',
+      '-p', prompt,
+      '--output-format', 'text',
+      '--dangerously-skip-permissions',
+    ];
+    if (salvageModel) args.push('--model', salvageModel);
+
+    const child = spawn(SALVAGE, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        PATH: `${HOME}/bin:/opt/homebrew/bin:/opt/homebrew/opt/node/bin:/usr/local/bin:/usr/bin:/bin`,
+        HOME,
+      },
+    });
+
+    let stdout = '', stderr = '';
+    child.stdout.on('data', d => { stdout += d; });
+    child.stderr.on('data', d => { stderr += d; });
+    child.on('close', code => {
+      if (code !== 0 && !stdout.trim()) reject(new Error(`salvage exited ${code}: ${stderr.trim().slice(0, 500)}`));
+      else resolve(stdout.trim());
+    });
+    child.on('error', reject);
+  });
+}
+
+// ── Ollama (vision path) ──────────────────────────────────────────────────
+function resolveOllamaModel(model) {
+  if (!model || model === 'default' || model === 'salvage') return 'gemma4:latest';
+  if (model.startsWith('ollama/')) return model.slice('ollama/'.length);
+  // mgc-proxy/* → fall back to local gemma when Claude isn't available
+  return 'gemma4:latest';
+}
+
+// Extract base64 data from a data URL (strips "data:image/...;base64,")
+function dataUrlToBase64(dataUrl) {
+  return dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+}
+
+function callOllama(messages, model) {
+  const ollamaModel = resolveOllamaModel(model);
+
+  // Ollama chat format: images are base64 strings in the message's "images" array
+  const ollamaMessages = messages
+    .filter(m => m.role === 'user' || m.role === 'assistant')
+    .map(m => {
+      if (typeof m.content === 'string') return { role: m.role, content: m.content };
+      if (!Array.isArray(m.content)) return { role: m.role, content: String(m.content) };
+
+      const textParts = m.content.filter(p => p.type === 'text').map(p => p.text);
+      const images = m.content
+        .filter(p => p.type === 'image_url' && p.image_url?.url)
+        .map(p => dataUrlToBase64(p.image_url.url));
+
+      const msg = { role: m.role, content: textParts.join('\n') };
+      if (images.length) msg.images = images;
+      return msg;
+    });
+
+  // Inject system prompt to elicit visible reasoning for Gemma 4
+  const thinkingSystem = {
+    role: 'system',
+    content: 'Before answering, reason through the problem inside <think>...</think> tags. Then give your final response outside the tags.',
+  };
+  const messagesWithThink = [thinkingSystem, ...ollamaMessages];
+  const body = JSON.stringify({ model: ollamaModel, messages: messagesWithThink, stream: false });
+
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port: 11434,
+      path: '/api/chat',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    }, res => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.error) return reject(new Error(parsed.error));
+          // Parse <think>...</think> out of content
+          const raw = parsed.message?.content || '';
+          const thinkMatch = raw.match(/^<think>([\s\S]*?)<\/think>\s*/);
+          const thinking = thinkMatch ? thinkMatch[1].trim() : '';
+          const content = thinkMatch ? raw.slice(thinkMatch[0].length).trim() : raw;
+          resolve({ content, thinking });
+        } catch (e) {
+          reject(new Error(`Ollama parse error: ${data.slice(0, 200)}`));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+// ── HTTP Server ───────────────────────────────────────────────────────────
+const server = http.createServer(async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+
+  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+  const url = req.url.split('?')[0];
+
+  // ── GET /v1/models ────────────────────────────────────────────────────
+  if (req.method === 'GET' && url === '/v1/models') {
+    const models = [
+      'ollama/gemma4:latest',
+      'mgc-proxy/claude-haiku-4-5-20251001',
+      'mgc-proxy/claude-sonnet-4-20250514',
+      'mgc-proxy/claude-opus-4-20250514',
+    ];
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ object: 'list', data: models.map(id => ({ id, object: 'model', created: 1700000000, owned_by: 'opensalvage' })) }));
+    return;
+  }
+
+  // ── POST /v1/chat/completions ─────────────────────────────────────────
+  if (req.method === 'POST' && url === '/v1/chat/completions') {
+    let body;
+    try { body = await jsonBody(req); }
+    catch { return openaiError(res, 400, 'Invalid JSON body'); }
+
+    const { messages, model } = body;
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      return openaiError(res, 400, 'messages array is required');
+    }
+
+    const withImages = hasImages(messages);
+    console.log(`[bridge] ${new Date().toISOString()} model=${model || 'default'} images=${withImages}`);
+
+    let content, thinking = '';
+    try {
+      if (withImages) {
+        // Images → Ollama directly (salvage CLI can't handle image bytes)
+        const result = await callOllama(messages, model);
+        content = result.content;
+        thinking = result.thinking;
+      } else {
+        // All text → salvage (memory, tools, workspace context, then LLM)
+        // salvage routes to Claude or Ollama based on model
+        const prompt = formatForSalvage(messages);
+        content = await runSalvage(prompt, model);
+      }
+    } catch (err) {
+      console.error(`[bridge] error:`, err.message);
+      return openaiError(res, 500, err.message);
+    }
+
+    console.log(`[bridge] reply: ${content.slice(0, 80).replace(/\n/g, ' ')}…`);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(makeCompletion(content, model, thinking)));
+    return;
+  }
+
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: { message: 'Not found', code: 404 } }));
+});
+
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`salvage-chatbox-bridge running on http://127.0.0.1:${PORT}/v1`);
+  console.log(`workspace: ${WORKSPACE}`);
+});
+
+server.on('error', err => {
+  if (err.code === 'EADDRINUSE') console.error(`Port ${PORT} already in use.`);
+  else console.error('Server error:', err);
+  process.exit(1);
+});
